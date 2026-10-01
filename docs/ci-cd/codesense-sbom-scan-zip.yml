@@ -1,0 +1,77 @@
+# CodeSense — SBOM / Dependency Scan (Zip Upload Mode)
+#
+# Same pattern as the code scan, pointed at /api/scans/sbom/create/.
+# The zip should contain a manifest the dependency scanner can catalog
+# (requirements.txt, package-lock.json, go.mod, etc.) -- a bare package.json
+# with no lockfile will NOT get cataloged.
+#
+# Code and SBOM scans are counted independently against the trial cap --
+# running both in one pipeline consumes one slot from each counter.
+#
+# Required secret pipeline variables:
+#   CODESENSE_API_URL     - e.g. http://<vm-ip>:8080  (leave unset if unreachable from CI)
+#   CODESENSE_API_KEY     - the csk_... key from Project > Settings > CI API Keys
+#   CODESENSE_PROJECT_ID  - the project ID the key is bound to
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Package workspace for CodeSense SBOM scan'
+    inputs:
+      targetType: inline
+      script: |
+        Compress-Archive -Path "$(Build.SourcesDirectory)\*" `
+          -DestinationPath "$(Build.ArtifactStagingDirectory)\codesense-sbom-scan.zip" -Force
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish SBOM scan payload as a pipeline artifact'
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)\codesense-sbom-scan.zip'
+      artifact: 'codesense-sbom-scan-payload'
+
+  - task: PowerShell@2
+    displayName: 'Submit SBOM scan to CodeSense (if reachable)'
+    condition: ne(variables['CODESENSE_API_URL'], '')
+    inputs:
+      targetType: inline
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $zipPath = "$(Build.ArtifactStagingDirectory)\codesense-sbom-scan.zip"
+        $uri     = "$(CODESENSE_API_URL)/api/scans/sbom/create/"
+
+        # Windows PowerShell 5.1 does NOT support Invoke-RestMethod's -Form
+        # parameter (added in PowerShell 6.1+) -- built manually for the
+        # same reason as the code-scan step.
+        Add-Type -AssemblyName System.Net.Http
+
+        $httpClient = New-Object System.Net.Http.HttpClient
+        $httpClient.DefaultRequestHeaders.Authorization = `
+          New-Object System.Net.Http.Headers.AuthenticationHeaderValue(
+            "Bearer", "$(CODESENSE_API_KEY)")
+
+        $form = New-Object System.Net.Http.MultipartFormDataContent
+        $form.Add((New-Object System.Net.Http.StringContent(
+          "$(Build.Repository.Name)-$(Build.SourceBranchName)-sbom")), "scan_name")
+        $form.Add((New-Object System.Net.Http.StringContent(
+          "$(CODESENSE_PROJECT_ID)")), "project_id")
+
+        $fileStream  = [System.IO.File]::OpenRead($zipPath)
+        $fileContent = New-Object System.Net.Http.StreamContent($fileStream)
+        $fileContent.Headers.ContentType = `
+          [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/zip")
+        # NOTE: field name is "zip_file" here too, not "sbom_file" -- both
+        # scan-creation endpoints share the same serializer field name.
+        $form.Add($fileContent, "zip_file", [System.IO.Path]::GetFileName($zipPath))
+
+        try {
+          $response = $httpClient.PostAsync($uri, $form).GetAwaiter().GetResult()
+          $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+          if (-not $response.IsSuccessStatusCode) {
+            Write-Error "CodeSense SBOM scan submission failed: $($response.StatusCode) $body"
+            exit 1
+          }
+          Write-Host "CodeSense SBOM scan submitted: $body"
+        } finally {
+          $fileStream.Dispose()
+          $form.Dispose()
+          $httpClient.Dispose()
+        }

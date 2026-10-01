@@ -1,0 +1,1012 @@
+import os, zipfile, uuid
+import tempfile
+from django.db import close_old_connections
+from django.http import JsonResponse
+from local.api_app.models.scan_models import ScanModel
+from local.api_app.serializers.scan_serializers import ScanStartSerializer
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+from rest_framework.views import APIView
+from rest_framework import status
+from scanner.rag.scanner import scan_folder
+from scanner.rag.resume import already_done_fingerprints
+import logging
+import shutil
+import threading
+
+from local.auth_app.permissions.decorators import require_permission
+from licenses.services.auth import require_assertion_jwt
+from licenses.services import trial
+from rest_framework.response import Response
+import asyncio
+from scanner.services.scan_service import scan_github_repo
+from scanner.rag.progress import update_progress
+from scanner.rag.scan_logging import scan_log_context
+from datetime import datetime, timezone
+from local.api_app.models.sbom_models import SbomModel
+from local.api_app.models.orm import Scan, SbomScan
+from local.api_app.serializers.scan_serializers import ScanStartSerializer, ScanWithSbomSerializer
+
+logger = logging.getLogger(__name__)
+
+
+# Keyed by project_id so a scan running for one project doesn't block a scan
+# for a completely unrelated project -- still one-at-a-time WITHIN a given
+# project, which is the invariant this actually needs to protect.
+_project_scan_threads: dict[str, threading.Thread] = {}
+_project_scan_threads_lock = threading.Lock()
+# Cooperative-cancel signals for the scan currently running, keyed by scan_id.
+# Only ever has at most one live entry given the one-scan-at-a-time invariant
+# above, but keyed defensively rather than assuming that never changes.
+_cancel_events: dict[str, threading.Event] = {}
+
+
+def _resolve_media_root() -> str:
+    """Where extracted scan sources are durably retained (so an interrupted/
+    cancelled scan can be resumed after a restart).
+
+    Must NOT resolve to anywhere inside a git working tree: OpenGrep's
+    directory walker silently enumerates 0 files for any path inside a git
+    repo (see CLAUDE.md's "Windows/git gotcha"), so settings.BASE_DIR
+    (server/, tracked by this repo) is unsafe here even though other app
+    data safely uses it. Respects CODESENSE_DATA_DIR -- the packaged app's
+    real external app-data directory (set by the Tauri launcher, see
+    client/src-tauri/src/main.rs), matching settings.DATA_DIR's own
+    convention -- when set; otherwise falls back to the OS temp directory,
+    which by definition is never inside any git repo.
+    """
+    data_dir = os.getenv("CODESENSE_DATA_DIR")
+    if data_dir:
+        return os.path.join(data_dir, "media", "scans")
+    return os.path.join(tempfile.gettempdir(), "codesense-media", "scans")
+
+
+MEDIA_ROOT = _resolve_media_root()
+os.makedirs(MEDIA_ROOT, exist_ok=True)
+
+
+def _run_lsast_pipeline(scan_id, source_path, triggered_by, scan_name,
+                        skip_fingerprints=frozenset(), cancel_event=None, project_id=None):
+    """Runs the LSAST pipeline over an already-extracted source_path and updates
+    the Scan row accordingly. Shared by a fresh scan and a resumed one -- the
+    only difference between the two call sites is what skip_fingerprints/
+    cancel_event they pass in.
+
+    ``project_id``, when given, enables incremental scanning inside
+    scan_folder() (see scanner/rag/scanner.py) -- omitted here it just falls
+    back to a full scan, so it's an optional/backward-compatible addition.
+
+    Once source_path exists, any non-'completed'/'cancelled' outcome lands in
+    'interrupted' (never 'failed') -- resuming is always safe from here since
+    the source is retained regardless of how this call ends.
+    """
+    # A cancel request can be persisted to the DB (via ScanCancelView) before
+    # this pipeline -- and its cancel_event -- even exist, e.g. while the scan
+    # is still "queued" during upload/extraction or clone. Sync the fresh
+    # event from the durable DB flag before doing any real work, otherwise
+    # that cancellation would be silently dropped: cancel_requested=True sits
+    # in the DB, nothing re-checks it, and the scan runs to completion anyway.
+    if cancel_event is not None:
+        already_requested = Scan.objects.filter(id=scan_id, cancel_requested=True).exists()
+        if already_requested:
+            cancel_event.set()
+    scan_dir = os.path.join(MEDIA_ROOT, str(scan_id))
+    try:
+        with scan_log_context(scan_dir):
+            try:
+                findings = scan_folder(
+                    folder_path=source_path,
+                    scan_id=scan_id,
+                    triggered_by=triggered_by,
+                    scan_name=scan_name,
+                    skip_fingerprints=skip_fingerprints,
+                    cancel_event=cancel_event,
+                    project_id=project_id,
+                )
+                logger.info(f"Scan run finished. Found {len(findings) if findings else 0} vulnerabilities.")
+            except Exception as e:
+                logger.error(f"Error during scan: {e}")
+                ScanModel.update_status(scan_id, "interrupted")
+                update_progress(
+                    scan_id=scan_id,
+                    status="interrupted",
+                    end_time=datetime.now(timezone.utc),
+                    error=str(e),
+                )
+                import traceback
+                logger.error(traceback.format_exc())
+    finally:
+        _cancel_events.pop(scan_id, None)
+        # This thread never goes through Django's request_started/
+        # request_finished signals, so its DB connection is never
+        # auto-closed -- release it explicitly.
+        close_old_connections()
+
+
+def _service_identity_forbidden(request, project_id: str) -> bool:
+    user = request.user if isinstance(request.user, dict) else {}
+    return user.get("role") == "service" and user.get("project_id") != project_id
+
+
+def _effective_project_id(project_id):
+    """None disables incremental scanning inside scan_folder() (full scan). The
+    incremental_scan feature is Pro+; Community always does a full scan."""
+    from licenses.services import entitlements
+    if not entitlements.get().feature("incremental_scan"):
+        return None
+    return project_id
+
+
+def _enforce_scan_quota(scan_type):
+    """(allowed, body, status). Edition per-window scan cap, checked alongside the
+    existing trial.can_start gate."""
+    from licenses.services import limits
+    if limits.can_start_scan(scan_type):
+        return True, None, None
+    key = "code_scans_per_window" if scan_type == "code" else "sbom_scans_per_window"
+    from licenses.services import entitlements
+    lim = entitlements.get().limit(key)
+    return False, {
+        "detail": f"Edition scan limit reached — {limits.scans_in_window(scan_type)}/{lim} "
+                  f"{scan_type} scans in the last 30 days. Upgrade to raise this limit.",
+    }, 403
+
+
+def _enforce_codebase_size(infolist):
+    """(allowed, body, status). infolist = zipfile.ZipFile.infolist()."""
+    from licenses.services import limits
+    total = sum(getattr(i, "file_size", 0) for i in infolist)
+    if limits.codebase_size_ok(total):
+        return True, None, None
+    from licenses.services import entitlements
+    lim_mb = entitlements.get().limit("max_codebase_mb")
+    return False, {
+        "detail": f"Codebase is {total / (1024*1024):.1f} MB; this edition allows "
+                  f"{lim_mb} MB. Upgrade to scan larger codebases.",
+    }, 413
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ScanCreateView(APIView):
+    @require_permission("create_scan")
+    # @require_assertion_jwt("scan", force_refresh=True)
+    def post(self, request):
+        if not trial.can_start(trial.CODE):
+            return JsonResponse(
+                {"detail": f"Trial limit reached — {trial.used(trial.CODE)}/{trial.limit()} "
+                           f"code scans used. Contact us to upgrade to the full version.",
+                 "trial": trial.status()},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        allowed, body, code = _enforce_scan_quota("code")
+        if not allowed:
+            return JsonResponse(body, status=code)
+        serializer = ScanStartSerializer(data=request.data)
+        user = request.user
+        triggered_by = user.get("id", "68863cf8ee93d4964a00d585")
+ 
+        if serializer.is_valid():
+            scan_name = serializer.validated_data['scan_name']
+            project_id = serializer.validated_data['project_id']
+            if _service_identity_forbidden(request, project_id):
+                return JsonResponse(
+                    {"error": "API key is not authorized for this project"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            zip_file = serializer.validated_data['zip_file']
+ 
+            # Create scan doc
+            scan_data = {
+                "scan_name": scan_name,
+                "project_id": project_id,
+                "status": "queued",
+                "source": "zip",
+                "triggered_by": triggered_by if triggered_by else None
+            }
+            scan = ScanModel.create(scan_data)
+            scan_id = scan["id"]
+ 
+            # Extracted source is retained (not a throwaway temp dir) so an
+            # interrupted/cancelled scan can be resumed without re-uploading.
+            # source_path is only recorded on the row once extraction has
+            # actually succeeded (below) -- a bad zip / pre-extraction failure
+            # has nothing to resume, so the row must not point at a directory
+            # that's about to be rmtree'd.
+            scan_dir = os.path.join(MEDIA_ROOT, str(scan_id))
+            temp_dir = os.path.join(scan_dir, "upload")
+            extracted_folder_path = os.path.join(scan_dir, "source")
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_zip_path = os.path.join(temp_dir, zip_file.name)
+
+            try:
+                # Save uploaded ZIP file
+                with open(temp_zip_path, 'wb+') as f:
+                    for chunk in zip_file.chunks():
+                        f.write(chunk)
+                logging.info(f"Uploaded zipped folder saved to {temp_zip_path}")
+ 
+                os.makedirs(extracted_folder_path, exist_ok=True)
+                # A real codebase's own directory nesting (node_modules, Java/
+                # C# package trees, ...) combined with this already-fairly-long
+                # base path routinely exceeds Windows' 260-char MAX_PATH during
+                # extraction ("Windows cannot complete the extraction, the
+                # destination path is too long"). The \\?\ extended-length
+                # prefix tells the Win32 API to bypass that limit; harmless
+                # on POSIX where this prefix is simply never used.
+                extract_target = extracted_folder_path
+                if os.name == "nt" and not extract_target.startswith("\\\\?\\"):
+                    extract_target = "\\\\?\\" + os.path.abspath(extracted_folder_path)
+                with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+                    # Prevent Zip Slip
+                    for member in zip_ref.namelist():
+                        member_path = os.path.abspath(
+                            os.path.join(extracted_folder_path, member)
+                        )
+                        if not member_path.startswith(os.path.abspath(extracted_folder_path)):
+                            raise Exception("Zip Slip attack detected")
+                    allowed, body, code = _enforce_codebase_size(zip_ref.infolist())
+                    if not allowed:
+                        ScanModel.update_status(scan_id, "failed")
+                        shutil.rmtree(scan_dir, ignore_errors=True)
+                        return JsonResponse(body, status=code)
+                    zip_ref.extractall(extract_target)
+                logging.info(f"ZIP file extracted to {extracted_folder_path}")
+
+                # Strip VCS/CI metadata dirs -- not part of the target codebase's
+                # own vulnerabilities, and a real OpenGrep bug: a .github/ folder
+                # anywhere in the scanned tree can trip a git-repo-detection
+                # heuristic that silently zeroes out rule-matching for the ENTIRE
+                # directory scan (the CLI summary still reports the raw
+                # scanned-file count from an earlier pass, masking the failure --
+                # confirmed via a real DVWA scan: 0 findings with .github present,
+                # 90 with it stripped, identical rules/content otherwise).
+                _STRIPPED_DIR_NAMES = {".git", ".github"}
+                for root, dirs, _files in os.walk(extract_target, topdown=True):
+                    for d in list(dirs):
+                        if d in _STRIPPED_DIR_NAMES:
+                            shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                            dirs.remove(d)
+
+                # List contents for debugging -- best-effort only. os.walk()
+                # here uses the non-prefixed path (unlike the extraction
+                # above), so on a system without long-path support enabled it
+                # can still hit the same MAX_PATH wall on a real codebase's
+                # deep nesting; a failure here is diagnostic noise, not a
+                # reason to report an otherwise-successful extraction as failed.
+                try:
+                    extracted_contents = []
+                    for root, dirs, files in os.walk(extracted_folder_path):
+                        for file in files:
+                            extracted_contents.append(os.path.join(root, file))
+                    logging.info(f"Extracted {len(extracted_contents)} files: {extracted_contents[:10]}...")  # Show first 10 files
+                except OSError as exc:
+                    logging.warning(f"Could not list extracted contents (non-fatal): {exc}")
+ 
+            except zipfile.BadZipFile:
+                logging.error("Uploaded file is not a valid ZIP file")
+                ScanModel.update_status(scan_id, "failed")
+                shutil.rmtree(scan_dir, ignore_errors=True)
+                return JsonResponse({"error": "Invalid zip file"}, status=status.HTTP_400_BAD_REQUEST)
+
+            except Exception as e:
+                logging.error(f"Failed to process uploaded file: {e}")
+                ScanModel.update_status(scan_id, "failed")
+                shutil.rmtree(scan_dir, ignore_errors=True)
+                return JsonResponse({"detail": "Failed to process uploaded file."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            with _project_scan_threads_lock:
+                existing = _project_scan_threads.get(project_id)
+                if existing and existing.is_alive():
+                    ScanModel.update_status(scan_id, "failed")
+                    Scan.objects.filter(id=scan_id).update(source_path="")
+                    shutil.rmtree(scan_dir, ignore_errors=True)
+                    return JsonResponse({"detail": "Scan already in progress."}, status=status.HTTP_409_CONFLICT)
+                # Extraction succeeded -- record source_path now, only once
+                # it's actually durable, then hand off to the pipeline.
+                Scan.objects.filter(id=scan_id).update(source_path=extracted_folder_path)
+                cancel_event = threading.Event()
+                _cancel_events[scan_id] = cancel_event
+                scan_thread = threading.Thread(
+                    target=_run_lsast_pipeline,
+                    args=(scan_id, extracted_folder_path, triggered_by, scan_name),
+                    kwargs={"cancel_event": cancel_event, "project_id": _effective_project_id(project_id)},
+                    daemon=True,
+                )
+                _project_scan_threads[project_id] = scan_thread
+                scan_thread.start()
+
+            return JsonResponse({"detail": "Scan started successfully.", "scan": scan}, status=status.HTTP_202_ACCEPTED)
+        else:
+            return JsonResponse(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+   
+   
+class ScanDetailView(APIView):
+    @require_permission("view_scans")
+    def get(self, request, scan_id):
+        scan = ScanModel.find_by_id(scan_id=scan_id)
+        if not scan:
+            return JsonResponse({"error": "Scan not found"}, status=status.HTTP_404_NOT_FOUND)
+ 
+        return JsonResponse(scan, status=status.HTTP_200_OK)
+   
+    @require_permission("delete_scan")
+    def delete(self, request, scan_id):
+        res = ScanModel.delete_scan(scan_id=scan_id)
+        if not res:
+            return JsonResponse({"error": "Scan not found"}, status=status.HTTP_404_NOT_FOUND)
+        return JsonResponse({"detail": "Scan deleted permenantly"}, status=status.HTTP_204_NO_CONTENT)
+   
+       
+class ScanListView(APIView):
+    @require_permission("view_scans")
+    def get(self, request, project_id):
+        type = str(request.query_params.get("type", "sca"))
+        page = int(request.query_params.get("page", 1))
+        limit = int(request.query_params.get("limit", 10))
+        search = request.query_params.get("search", "")
+
+        scans = []
+        match type:
+            case "sca":
+                scans = ScanModel.find_by_project(project_id=project_id, page=page, limit=limit, search=search)
+            case "sbom":
+                scans = SbomModel.find_by_project(project_id=project_id, page=page, limit=limit, search=search)
+        
+        if not scans:
+            return JsonResponse({"error": "scan not found"}, status=status.HTTP_404_NOT_FOUND)
+ 
+        return JsonResponse(scans, status=status.HTTP_200_OK)
+ 
+ 
+class GitHubRepoScanView(APIView):
+    @require_permission("create_scan")
+    # @require_assertion_jwt("scan", force_refresh=True)
+    def post(self, request):
+        if not trial.can_start(trial.CODE):
+            return Response(
+                {"detail": f"Trial limit reached — {trial.used(trial.CODE)}/{trial.limit()} "
+                           f"code scans used. Contact us to upgrade to the full version.",
+                 "trial": trial.status()},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        allowed, body, code = _enforce_scan_quota("code")
+        if not allowed:
+            return Response(body, status=code)
+        token = request.data.get("token") or request.data.get("git_token")
+        username = request.data.get("username") or request.data.get("git_rowner")
+        repo = request.data.get("repo") or request.data.get("git_repo")
+        branch = request.data.get("branch", "main")
+        scan_name = request.data.get("scan_name", f"{repo}-{branch}")
+        project_id = request.data.get("project_id")
+
+        if not all([token, username, repo, project_id]):
+            return Response(
+                {"error": "token, username, repo, project_id are required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Runs only once project_id is confirmed present (non-None, non-empty)
+        # by the check above -- avoids _service_identity_forbidden's `!=`
+        # comparison ever seeing project_id=None on this call site (unlike
+        # ScanCreateView, where the serializer already guarantees a non-empty
+        # string before the check runs).
+        if _service_identity_forbidden(request, project_id):
+            return Response(
+                {"error": "API key is not authorized for this project"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        triggered_by = request.data.get("triggered_by")
+        if not triggered_by and hasattr(request, "user") and isinstance(request.user, dict):
+            triggered_by = request.user.get("id")
+
+        # DB log
+        scan = ScanModel.create({
+            "scan_name": scan_name,
+            "project_id": project_id,
+            "status": "queued",
+            "source": "github",
+            "triggered_by": triggered_by or None,
+        })
+        scan_id = scan["id"]
+ 
+        # Background thread
+        def run_github_scan():
+            # Two genuinely different failure modes: a clone failure means
+            # source_path was never set -- there is nothing to resume, so it
+            # lands in "failed" (mirrors ScanCreateView's pre-extraction
+            # handlers). Once folder_path exists, any pipeline failure is
+            # retained-and-resumable, so it's delegated to the same
+            # _run_lsast_pipeline() helper the zip path uses -- that's what
+            # lands it in "interrupted" instead.
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                result = loop.run_until_complete(
+                    scan_github_repo(token, username, repo, branch)
+                )
+                folder_path = result["folder_path"]
+            except Exception as e:
+                logging.error(f"GitHub clone failed: {e}")
+                ScanModel.update_status(scan_id, "failed")
+                update_progress(
+                    scan_id=scan_id,
+                    status="failed",
+                    end_time=datetime.now(timezone.utc),
+                    error=str(e),
+                )
+                _cancel_events.pop(scan_id, None)
+                close_old_connections()
+                return
+
+            Scan.objects.filter(id=scan_id).update(source_path=folder_path)
+            cancel_event = _cancel_events.get(scan_id)
+            _run_lsast_pipeline(scan_id, folder_path, triggered_by, scan_name,
+                               cancel_event=cancel_event, project_id=_effective_project_id(project_id))
+
+        with _project_scan_threads_lock:
+            existing = _project_scan_threads.get(project_id)
+            if existing and existing.is_alive():
+                ScanModel.update_status(scan_id, "failed")
+                return Response(
+                    {"detail": "Another scan already in progress."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            _cancel_events[scan_id] = threading.Event()
+            scan_thread = threading.Thread(target=run_github_scan, daemon=True)
+            _project_scan_threads[project_id] = scan_thread
+            scan_thread.start()
+
+        return Response(
+            {"detail": "GitHub scan started", "scan": scan},
+            status=202
+        )
+
+
+class ScanCancelView(APIView):
+    """Explicit user-initiated cancellation of a queued/running scan.
+
+    The status check and the cancel_requested write are folded into a single
+    conditional UPDATE (not a separate read-then-write) so a scan that finishes
+    naturally in the gap can't be incorrectly stamped cancelled with a false
+    202 -- see ScanCancelViewAtomicityTests.
+
+    This is still check-then-act with respect to the rest of the system: the
+    persisted cancel_requested flag is the durable source of truth that
+    ScanResumeView / startup reconciliation (Tasks 13-14) and
+    reconcile_orphaned_scans() read to decide "interrupted" vs "cancelled" --
+    the in-memory Event signal below is purely a best-effort prompt for a scan
+    running live in *this* process right now.
+    """
+
+    @require_permission("update_scan")
+    def post(self, request, scan_id):
+        scan = ScanModel.find_by_id(scan_id=scan_id)
+        if not scan:
+            return JsonResponse({"error": "Scan not found"}, status=status.HTTP_404_NOT_FOUND)
+        updated = Scan.objects.filter(
+            id=scan_id, status__in=("queued", "in_progress")
+        ).update(cancel_requested=True)
+        if not updated:
+            return JsonResponse(
+                {"detail": f"Scan is {scan['status']}, nothing to cancel."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        event = _cancel_events.get(scan_id)
+        if event is not None:
+            event.set()
+        return JsonResponse({"detail": "Cancellation requested."}, status=status.HTTP_202_ACCEPTED)
+
+
+class SbomCancelView(APIView):
+    """SBOM/SCA counterpart of ScanCancelView -- same atomic conditional
+    UPDATE + best-effort in-memory Event signal, checked between pipeline
+    steps (see sbom_pipeline.py's _check_cancelled) rather than mid-subprocess,
+    the same between-units granularity ScanCancelView's code-scan pipeline
+    uses between findings."""
+
+    @require_permission("update_scan")
+    def post(self, request, scan_id):
+        scan = SbomModel.find_by_id(scan_id=scan_id)
+        if not scan:
+            return JsonResponse({"error": "Scan not found"}, status=status.HTTP_404_NOT_FOUND)
+        updated = SbomScan.objects.filter(
+            id=scan_id, status__in=("queued", "in_progress")
+        ).update(cancel_requested=True)
+        if not updated:
+            return JsonResponse(
+                {"detail": f"Scan is {scan['status']}, nothing to cancel."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        event = _cancel_events.get(scan_id)
+        if event is not None:
+            event.set()
+        return JsonResponse({"detail": "Cancellation requested."}, status=status.HTTP_202_ACCEPTED)
+
+
+class ScanResumeView(APIView):
+    """Manual resume for an 'interrupted'/'cancelled' scan whose source_path is
+    still retained on disk. Re-dispatches the LSAST pipeline over that same
+    source, skipping any finding already persisted from a prior attempt (via
+    already_done_fingerprints) so only genuinely new work goes through the
+    LLM verify/enrich step.
+    """
+
+    @require_permission("update_scan")
+    def post(self, request, scan_id):
+        scan = ScanModel.find_by_id(scan_id=scan_id)
+        if not scan:
+            return JsonResponse({"error": "Scan not found"}, status=status.HTTP_404_NOT_FOUND)
+        # Cheap early gate: an obviously-non-resumable scan (e.g. already
+        # "completed") must bail out here, before the destructive 410 branch
+        # below gets a chance to run -- that branch calls update_status(...,
+        # "failed") unconditionally once it's reached, so letting a
+        # non-resumable scan fall through to it would corrupt an already-
+        # terminal scan's status just because its retained source happens to
+        # be gone. This is a defense-in-depth check, not the authoritative
+        # one -- the atomic conditional UPDATE further down is what actually
+        # guards against a status change racing in after this read (TOCTOU).
+        if scan["status"] not in ("interrupted", "cancelled"):
+            return JsonResponse(
+                {"detail": f"Scan is {scan['status']}, not resumable."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # Trial gate only applies when resuming a "cancelled" scan: cancelling
+        # releases its slot (trial._ACTIVE_STATUSES excludes "cancelled", same
+        # as "failed"), so resuming one is equivalent to starting new work. An
+        # "interrupted" scan never released its slot (it's still counted via
+        # trial.in_progress()), so gating it here would wrongly re-check a
+        # slot it already owns and could block it from resuming itself.
+        if scan["status"] == "cancelled" and not trial.can_start(trial.CODE):
+            return JsonResponse(
+                {"detail": f"Trial limit reached — {trial.used(trial.CODE)}/{trial.limit()} "
+                           f"code scans used. Contact us to upgrade to the full version.",
+                 "trial": trial.status()},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        source_path = Scan.objects.filter(id=scan_id).values_list("source_path", flat=True).first()
+        if not source_path or not os.path.isdir(source_path):
+            ScanModel.update_status(scan_id, "failed")
+            return JsonResponse(
+                {"detail": "Source is no longer available; please start a new scan."},
+                status=status.HTTP_410_GONE,
+            )
+
+        # Computed before the lock/state-flip below: it doesn't depend on
+        # anything inside that section, and keeping a fallible DB call out
+        # from between "state flipped to in_progress" and "thread started"
+        # means a raise here can't strand the row in in_progress forever with
+        # a dangling _cancel_events entry -- there's nothing to roll back yet.
+        skip = already_done_fingerprints(scan_id)
+
+        with _project_scan_threads_lock:
+            existing = _project_scan_threads.get(scan["project_id"])
+            if existing and existing.is_alive():
+                return JsonResponse(
+                    {"detail": "Another scan already in progress."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            # Status check + cancel_requested clear + status flip folded into
+            # one conditional UPDATE (not a separate read-then-write), same
+            # pattern as ScanCancelView -- if the row was deleted or moved to
+            # a non-resumable status in the gap since the read above, this
+            # no-ops and `updated` is 0, so we bail out instead of starting a
+            # pipeline thread against a row that's no longer resumable (which
+            # would otherwise insert orphaned Finding rows).
+            updated = Scan.objects.filter(
+                id=scan_id, status__in=("interrupted", "cancelled"),
+            ).update(cancel_requested=False, status="in_progress")
+            if not updated:
+                return JsonResponse(
+                    {"detail": f"Scan is {scan['status']}, not resumable."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            cancel_event = threading.Event()
+            _cancel_events[scan_id] = cancel_event
+            scan_thread = threading.Thread(
+                target=_run_lsast_pipeline,
+                args=(scan_id, source_path, scan["triggered_by"], scan["scan_name"]),
+                kwargs={"skip_fingerprints": skip, "cancel_event": cancel_event,
+                        "project_id": _effective_project_id(scan["project_id"])},
+                daemon=True,
+            )
+            _project_scan_threads[scan["project_id"]] = scan_thread
+            scan_thread.start()
+
+        scan["status"] = "in_progress"
+        return JsonResponse({"detail": "Scan resumed.", "scan": scan}, status=status.HTTP_202_ACCEPTED)
+
+
+class ModelHealthView(APIView):
+    @require_permission("view_scans")
+    def get(self, request):
+        # Lazy import: llm.py is the llm_analysis-gated subsystem, absent from a
+        # Community edition export (docs/EDITIONS-REPO-SPLIT.md). This view is
+        # not itself edition-gated (pre-existing), so on Community it now 500s
+        # here instead of returning a (still-useless) health check against a
+        # model host Community never spawns -- flagged as a known follow-up.
+        from scanner.rag.llm import get_llm
+        client = get_llm()
+        try:
+            health = client.healthcheck()
+        except Exception as exc:
+            return Response(
+                {
+                    "status": "error",
+                    "provider": "vllm",
+                    "configured_model": client.model,
+                    "base_url": client.base_url,
+                    "error": str(exc),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        # /models can be unauthenticated — validate inference (API key) for real
+        # so the reported status reflects whether scans can actually use the LLM.
+        inference_ok, inference_detail = client.check_inference()
+        return Response(
+            {
+                "status": "ok" if inference_ok else "degraded",
+                "provider": "vllm",
+                "base_url": health["base_url"],
+                "configured_model": health["configured_model"],
+                "available_models": health["available_models"],
+                "inference_ok": inference_ok,
+                "inference_detail": inference_detail,
+            },
+            status=status.HTTP_200_OK if inference_ok else status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+@method_decorator(csrf_exempt, name="dispatch")
+class SbomCreateView(APIView):
+
+    @require_permission("create_scan")
+    # @require_assertion_jwt("scan", force_refresh=True)
+    def post(self, request):
+
+        if not trial.can_start(trial.SBOM):
+            return JsonResponse(
+                {"detail": f"Trial limit reached — {trial.used(trial.SBOM)}/{trial.limit()} "
+                           f"SBOM scans used. Contact us to upgrade to the full version.",
+                 "trial": trial.status()},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        allowed, body, code = _enforce_scan_quota("sbom")
+        if not allowed:
+            return JsonResponse(body, status=code)
+
+        serializer = ScanStartSerializer(data=request.data)
+        user = request.user
+        triggered_by = user.get("id", "68863cf8ee93d4964a00d585")
+
+        if not serializer.is_valid():
+            return JsonResponse(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        scan_name = serializer.validated_data["scan_name"]
+        project_id = serializer.validated_data["project_id"]
+        if _service_identity_forbidden(request, project_id):
+            return JsonResponse(
+                {"error": "API key is not authorized for this project"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        zip_file = serializer.validated_data["zip_file"]
+
+        scan_data = {
+            "scan_name": scan_name,
+            "project_id": project_id,
+            "status": "queued",
+            "triggered_by": triggered_by if triggered_by else None,
+        }
+
+        scan = SbomModel.create(scan_data)
+        scan_id = scan["id"]
+
+        logging.info(f"Created SBOM scan {scan_id}")
+
+        temp_dir = tempfile.mkdtemp()
+        temp_zip_path = os.path.join(temp_dir, zip_file.name)
+        extracted_folder_path = os.path.join(temp_dir, "extracted")
+
+        try:
+
+            with open(temp_zip_path, "wb+") as f:
+                for chunk in zip_file.chunks():
+                    f.write(chunk)
+            os.makedirs(extracted_folder_path, exist_ok=True)
+
+            with zipfile.ZipFile(temp_zip_path, "r") as zip_ref:
+                # Prevent Zip Slip
+                for member in zip_ref.namelist():
+                    member_path = os.path.abspath(
+                        os.path.join(extracted_folder_path, member)
+                    )
+                    if not member_path.startswith(os.path.abspath(extracted_folder_path)):
+                        raise Exception("Zip Slip attack detected")
+
+                zip_ref.extractall(extracted_folder_path)
+        except zipfile.BadZipFile:
+            SbomModel.update_status(scan_id, "failed")
+            shutil.rmtree(temp_dir)
+            return JsonResponse(
+                {"error": "Invalid zip file"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        except Exception as e:
+            logging.error(f"Zip processing failed: {e}")
+            SbomModel.update_status(scan_id, "failed")
+            shutil.rmtree(temp_dir)
+            return JsonResponse(
+                {"detail": "Failed to process uploaded file."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # --------------------------------
+        # Background scan worker
+        # --------------------------------
+
+        def run_scan(cancel_event):
+            try:
+                logging.info(f"Starting SBOM scan {scan_id}")
+                SbomModel.update_status(scan_id, "in_progress")
+                from scanner.services.sbom_pipeline import run_project_pipeline, SbomScanCancelled
+                results = run_project_pipeline(
+                    project_path=extracted_folder_path,
+                    scan_id=scan_id,
+                    triggered_by=triggered_by,
+                    cancel_event=cancel_event,
+                )
+
+                SbomModel.update_progress(
+                    scan_id,
+                    vulnerabilities=results["total_vulnerabilities"],
+                    severity_counts=results["severity_counts"],
+                    ecosystems=results["ecosystems"],
+                    dependencies_scanned=results["dependencies_scanned"],
+                    status="completed",
+                    end_time=datetime.now(timezone.utc),
+                )
+                try:
+                    trial.record_completion(trial.SBOM)
+                except Exception as exc:  # trial accounting must never sink a scan
+                    logging.warning(f"trial.record_completion failed: {exc}")
+                try:
+                    from licenses.services import limits
+                    limits.record_scan(limits.SBOM)
+                except Exception as exc:
+                    logging.warning(f"limits.record_scan failed: {exc}")
+
+                logging.info(
+                    f"SBOM scan {scan_id} completed. "
+                    f"{results['total_vulnerabilities']} vulnerabilities found"
+                )
+
+            except SbomScanCancelled:
+                logging.info(f"SBOM scan {scan_id} cancelled")
+                SbomModel.update_status(scan_id, "cancelled")
+
+            except Exception as e:
+                logging.error(f"SBOM scan {scan_id} failed: {e}")
+                SbomModel.update_status(scan_id, "failed")
+
+            finally:
+                _cancel_events.pop(scan_id, None)
+                # cleanup temporary project extraction
+                try:
+                    shutil.rmtree(temp_dir)
+                    logging.info(f"Cleaned workspace for scan {scan_id}")
+                except Exception as e:
+                    logging.error(f"Cleanup failed for scan {scan_id}: {e}")
+                # This thread never goes through Django's request_started/
+                # request_finished signals, so its DB connection is never
+                # auto-closed -- release it explicitly.
+                close_old_connections()
+
+        with _project_scan_threads_lock:
+            existing = _project_scan_threads.get(project_id)
+            if existing and existing.is_alive():
+                SbomModel.update_status(scan_id, "failed")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return JsonResponse(
+                    {"detail": "Another scan already in progress."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            cancel_event = threading.Event()
+            _cancel_events[scan_id] = cancel_event
+            scan_thread = threading.Thread(
+                target=run_scan,
+                args=(cancel_event,),
+                daemon=True
+            )
+            _project_scan_threads[project_id] = scan_thread
+
+            scan_thread.start()
+
+        return JsonResponse(
+            {
+                "detail": "SBOM scan started successfully.",
+                "scan": scan
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+   
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class GrypeCreateView(APIView):
+
+    @require_permission("create_scan")
+    # @require_assertion_jwt("scan", force_refresh=True)
+    def post(self, request):
+
+        if not trial.can_start(trial.SBOM):
+            return JsonResponse(
+                {"detail": f"Trial limit reached — {trial.used(trial.SBOM)}/{trial.limit()} "
+                           f"SBOM scans used. Contact us to upgrade to the full version.",
+                 "trial": trial.status()},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        allowed, body, code = _enforce_scan_quota("sbom")
+        if not allowed:
+            return JsonResponse(body, status=code)
+
+        serializer = ScanWithSbomSerializer(data=request.data)
+        user = request.user
+        triggered_by = user.get("id", None)
+
+        if not serializer.is_valid():
+            return JsonResponse(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        scan_name = serializer.validated_data["scan_name"]
+        project_id = serializer.validated_data["project_id"]
+        if _service_identity_forbidden(request, project_id):
+            return JsonResponse(
+                {"error": "API key is not authorized for this project"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        sbom_file = serializer.validated_data["sbom_file"]
+
+        # 🔴 Basic validation
+        if not sbom_file.name.endswith((".json", ".xml")):
+            return JsonResponse(
+                {"error": "Only JSON or XML SBOM files are supported"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        scan_data = {
+            "scan_name": scan_name,
+            "project_id": project_id,
+            "status": "queued",
+            "triggered_by": triggered_by,
+        }
+
+        scan = SbomModel.create(scan_data)
+        scan_id = scan["id"]
+
+        logging.info(f"Created SBOM scan {scan_id}")
+
+        temp_dir = tempfile.mkdtemp()
+        temp_file_path = os.path.join(temp_dir, sbom_file.name)
+
+        try:
+            # Save SBOM file
+            with open(temp_file_path, "wb+") as f:
+                for chunk in sbom_file.chunks():
+                    f.write(chunk)
+
+        except Exception as e:
+            logging.error(f"Failed to save SBOM file: {e}")
+            SbomModel.update_status(scan_id, "failed")
+            shutil.rmtree(temp_dir)
+            return JsonResponse(
+                {"detail": "Failed to process uploaded file."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # --------------------------------
+        # Background scan worker
+        # --------------------------------
+
+        def run_scan(cancel_event):
+            try:
+                logging.info(f"Starting SBOM scan {scan_id}")
+                SbomModel.update_status(scan_id, "in_progress")
+
+                from scanner.services.sbom_pipeline import run_sbom_pipeline, SbomScanCancelled
+
+                print(f"Running SBOM pipeline with file: {temp_file_path}")
+                results = run_sbom_pipeline(
+                    sbom_path=temp_file_path,   # 🔴 changed
+                    scan_id=scan_id,
+                    triggered_by=triggered_by,
+                    cancel_event=cancel_event,
+                )
+
+                SbomModel.update_progress(
+                    scan_id,
+                    vulnerabilities=results["total_vulnerabilities"],
+                    severity_counts=results["severity_counts"],
+                    ecosystems=results["ecosystems"],
+                    dependencies_scanned=results["dependencies_scanned"],
+                    status="completed",
+                    end_time=datetime.now(timezone.utc),
+                )
+                try:
+                    trial.record_completion(trial.SBOM)
+                except Exception as exc:  # trial accounting must never sink a scan
+                    logging.warning(f"trial.record_completion failed: {exc}")
+                try:
+                    from licenses.services import limits
+                    limits.record_scan(limits.SBOM)
+                except Exception as exc:
+                    logging.warning(f"limits.record_scan failed: {exc}")
+
+                logging.info(
+                    f"SBOM scan {scan_id} completed. "
+                    f"{results['total_vulnerabilities']} vulnerabilities found"
+                )
+
+            except SbomScanCancelled:
+                logging.info(f"SBOM scan {scan_id} cancelled")
+                SbomModel.update_status(scan_id, "cancelled")
+
+            except Exception as e:
+                logging.error(f"SBOM scan {scan_id} failed: {e}")
+                SbomModel.update_status(scan_id, "failed")
+
+            finally:
+                _cancel_events.pop(scan_id, None)
+                try:
+                    shutil.rmtree(temp_dir)
+                    logging.info(f"Cleaned workspace for scan {scan_id}")
+                except Exception as e:
+                    logging.error(f"Cleanup failed for scan {scan_id}: {e}")
+                # This thread never goes through Django's request_started/
+                # request_finished signals, so its DB connection is never
+                # auto-closed -- release it explicitly.
+                close_old_connections()
+
+        with _project_scan_threads_lock:
+            existing = _project_scan_threads.get(project_id)
+            if existing and existing.is_alive():
+                SbomModel.update_status(scan_id, "failed")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return JsonResponse(
+                    {"detail": "Another scan already in progress."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            cancel_event = threading.Event()
+            _cancel_events[scan_id] = cancel_event
+            scan_thread = threading.Thread(target=run_scan, args=(cancel_event,), daemon=True)
+            _project_scan_threads[project_id] = scan_thread
+            scan_thread.start()
+
+        return JsonResponse(
+            {
+                "detail": "SBOM scan started successfully.",
+                "scan": scan
+            },
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class SbomScanDetailView(APIView):
+    @require_permission("view_scans")
+    def get(self, request, scan_id):
+        scan = SbomModel.find_by_id(scan_id=scan_id)
+        if not scan:
+            return JsonResponse({"error": "Scan not found"}, status=status.HTTP_404_NOT_FOUND)
+ 
+        return JsonResponse(scan, status=status.HTTP_200_OK)
+   
+    @require_permission("delete_scan")
+    def delete(self, request, scan_id):
+        res = SbomModel.delete_scan(scan_id=scan_id)
+        if not res:
+            return JsonResponse({"error": "Scan not found"}, status=status.HTTP_404_NOT_FOUND)
+        return JsonResponse({"detail": "Scan deleted permenantly"}, status=status.HTTP_204_NO_CONTENT)  

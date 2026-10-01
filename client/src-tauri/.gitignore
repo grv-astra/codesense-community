@@ -1,0 +1,12 @@
+# Rust / Tauri build output
+/target
+/gen
+# Bundled artifacts placed by the build host (large; not source)
+/binaries
+/resources/model
+/resources/tools
+/resources/grype-db
+/resources/llama-runtime
+/resources/semgrep-rules
+/resources/webview2
+/webview2

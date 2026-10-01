@@ -1,0 +1,185 @@
+from .progress import update_progress
+from .ast_parser import analyze_folder
+from .lsast_scanner import lsast_scan_folder
+from .incremental import compute_file_manifest, compute_ruleset_version, diff_manifests, find_baseline_scan
+from .semgrep_detector import SemgrepDetectionError
+from datetime import datetime, timezone
+import traceback
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _persisted_findings_count(scan_id) -> int:
+    """The scan's TRUE findings total, read from the database rather than an
+    in-memory list. A resumed scan's `visible` list only holds findings from
+    THAT invocation -- findings verified+persisted before the interruption
+    were saved incrementally (save_findings_to_db) but live in a separate
+    process call, so counting `visible` after a resume silently undercounts.
+    The database is the only thing with the full picture across a resume
+    boundary.
+    """
+    from local.api_app.models.orm import Finding
+    return Finding.objects.filter(scan_id=scan_id, deleted=False).count()
+
+
+def _copy_forward_unchanged(baseline_scan_id: str, new_scan_id: str, unchanged_paths: set) -> int:
+    """Bulk-copies findings for files whose content is unchanged since the
+    baseline scan (see scanner/rag/incremental.py's diff_manifests), so the
+    new scan doesn't have to re-detect/re-verify them. Function-local import
+    of FindingModel matches this module's existing convention for
+    local.api_app model imports (see _persisted_findings_count above).
+    """
+    from local.api_app.models.finding_models import FindingModel
+    return FindingModel.copy_forward(baseline_scan_id, new_scan_id, unchanged_paths)
+
+
+def _scan_already_has_findings(scan_id: str) -> bool:
+    """True if scan_id already has any persisted findings -- a reliable signal this
+    scan_id is being resumed after copy-forward (or detection) already ran once,
+    since copy-forward is always the first DB-writing step in this pipeline."""
+    from local.api_app.models.orm import Finding  # match _copy_forward_unchanged's import style
+    return Finding.objects.filter(scan_id=scan_id).exists()
+
+
+def scan_folder(folder_path, scan_id, triggered_by, scan_name,
+                 skip_fingerprints=frozenset(), cancel_event=None, project_id=None):
+    """Run a vulnerability scan via the LSAST engine (the only engine).
+
+    LSAST = Semgrep detects -> LLM verifier classifies each finding TP/FP ->
+    fusion suppresses false positives and never silently drops a high-severity
+    finding. This function owns the scan lifecycle (AST metrics -> in_progress ->
+    completed/cancelled/interrupted) and returns the visible (non-suppressed)
+    findings.
+
+    ``skip_fingerprints``/``cancel_event`` support resuming an interrupted scan
+    -- see scanner/rag/resume.py and local/api_app/views/scan_views.py.
+
+    ``project_id``, when given, enables incremental scanning: if a completed
+    baseline scan exists for this project on the current ruleset version (see
+    scanner/rag/incremental.py), only changed/new files are re-detected and
+    findings for unchanged files are copied forward from the baseline. When
+    ``project_id`` is None or no baseline is found, this falls back to a full
+    scan (``only_files=None``), identical to pre-incremental-scan behavior.
+    On successful completion, this project's file manifest + ruleset version
+    are persisted so the *next* scan of this project has a usable baseline.
+    """
+    # ----------------------------------------------------------
+    # STEP 1 — AST ANALYSIS (LOC / functions / languages for the dashboard)
+    # ----------------------------------------------------------
+    try:
+        ast_metrics = analyze_folder(folder_path)
+        total_files = ast_metrics.get("total_files", 0)
+        update_progress(scan_id=scan_id, metrics=ast_metrics, total=total_files)
+        logger.info(
+            "AST Completed → LOC: %s | Functions: %s | Languages: %s",
+            ast_metrics.get("total_loc"),
+            ast_metrics.get("total_functions"),
+            ast_metrics.get("languages"),
+        )
+    except Exception as e:
+        logger.error("AST Analysis failed: %s\n%s", e, traceback.format_exc())
+        # The extracted source is retained (see scan_views.py) regardless of
+        # this failure, so resuming is always safe -- worst case it just
+        # retries AST analysis, no worse than a fresh scan. "failed" is
+        # reserved for pre-extraction failures where there's nothing to resume.
+        update_progress(
+            scan_id=scan_id,
+            error=str(e),
+            status="interrupted",
+            end_time=datetime.now(timezone.utc),
+        )
+        return []
+
+    # ----------------------------------------------------------
+    # STEP 2 — LSAST DETECTION + VERIFICATION
+    # ----------------------------------------------------------
+    update_progress(scan_id=scan_id, status="in_progress")
+    try:
+        # Incremental-scan baseline lookup: a project_id-scoped completed scan
+        # on the current ruleset version lets us restrict detection to only
+        # changed/new files and copy forward findings for unchanged ones. No
+        # baseline (first scan, ruleset changed, or no project_id) falls back
+        # to only_files=None -- the legacy full-folder scan, unchanged.
+        ruleset_version = compute_ruleset_version()
+        new_manifest = compute_file_manifest(folder_path)
+        baseline = find_baseline_scan(project_id, ruleset_version)
+
+        only_files = None
+        if baseline is not None:
+            changed_or_new, unchanged, _removed = diff_manifests(baseline.file_manifest, new_manifest)
+            only_files = sorted(changed_or_new)
+            if unchanged and not _scan_already_has_findings(scan_id):
+                _copy_forward_unchanged(baseline.id, scan_id, unchanged)
+
+        incremental_info = {
+            "is_incremental": baseline is not None,
+            "unchanged": len(unchanged) if baseline is not None else 0,
+            "changed": len(changed_or_new) if baseline is not None else total_files,
+        }
+        update_progress(scan_id=scan_id, incremental_info=incremental_info)
+
+        visible, _filtered = lsast_scan_folder(
+            folder_path, scan_id, triggered_by,
+            skip_fingerprints=skip_fingerprints, cancel_event=cancel_event,
+            only_files=only_files,
+        )
+    except SemgrepDetectionError as e:
+        # The detector never actually produced a result (timeout or missing
+        # binary) -- this must not look like a clean "0 findings" scan. The
+        # extracted source is retained, same as the AST-failure path above, so
+        # resuming just retries detection.
+        logger.error("LSAST detection failed: %s", e)
+        update_progress(
+            scan_id=scan_id,
+            error=str(e),
+            status="interrupted",
+            end_time=datetime.now(timezone.utc),
+        )
+        return []
+
+    # ----------------------------------------------------------
+    # STEP 3 — SCAN COMPLETE (or cancelled mid-way)
+    # ----------------------------------------------------------
+    if cancel_event is not None and cancel_event.is_set():
+        # No `scanned=` here: the LSAST loop's per-finding update_progress calls
+        # already wrote the accurate incremental count as files completed before
+        # the stop. Overwriting it with total_files would claim a full scan
+        # happened, contradicting status="cancelled".
+        update_progress(
+            scan_id=scan_id,
+            findings=_persisted_findings_count(scan_id),
+            status="cancelled",
+            end_time=datetime.now(timezone.utc),
+        )
+        logger.info("LSAST scan cancelled: %d findings persisted before stop for %s",
+                    len(visible), scan_name or "Unknown")
+        return visible
+
+    update_progress(
+        scan_id=scan_id,
+        findings=_persisted_findings_count(scan_id),
+        scanned=total_files,   # no per-file progress; on completion all files are done
+        total=total_files,     # re-assert the real file count in case anything else wrote here
+        status="completed",
+        end_time=datetime.now(timezone.utc),
+        # Persisted unconditionally (incl. the fallback/full-scan case) so the
+        # *next* scan of this project always has a usable incremental-scan
+        # baseline -- see the docstring above.
+        file_manifest=new_manifest,
+        ruleset_version=ruleset_version,
+    )
+    # Consume a trial slot only on successful completion (no-op when trial mode is
+    # off). Failures/cancellation return before reaching here, so they never count.
+    try:
+        from licenses.services import trial
+        trial.record_completion(trial.CODE)
+    except Exception as exc:  # noqa: BLE001 — trial accounting must never sink a scan
+        logger.warning("trial.record_completion failed: %s", exc)
+    try:
+        from licenses.services import limits
+        limits.record_scan(limits.CODE)
+    except Exception as exc:  # noqa: BLE001 — quota accounting must never sink a scan
+        logger.warning("limits.record_scan failed: %s", exc)
+    logger.info("LSAST scan completed: %d findings for %s", len(visible), scan_name or "Unknown")
+    return visible

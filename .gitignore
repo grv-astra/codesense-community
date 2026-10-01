@@ -1,0 +1,33 @@
+*.key
+*.pub
+.worktrees/
+/.claude/worktrees/
+
+# Staged offline scanner tools / DBs / rules (dev-from-source; large, downloadable)
+dist/
+
+# Dev/session log files (app, backend, frontend consoles)
+*.log
+*.log.prev-session
+
+# Native nginx deployment staging (downloaded binary distro; nginx.conf stays tracked)
+/native-deploy/nginx-1.27.4/
+/native-deploy/nginx.zip
+
+# Local dev tooling (not shipped / not version-controlled per maintainer choice)
+/start-dev.ps1
+/.claude/commands/
+/docs/security/.superpowers/
+
+# One-off local test artifacts / junk, not meant to ever be committed
+/server/evil.zip
+/llama-test.pid
+/scripts/offline_sbom/__pycache__/
+
+# Claude Code / superpowers skill runtime state (brainstorm sessions, PID files) —
+# local tooling state, not project source
+/.superpowers/
+
+# Contains a real one-time client-activation password + hash — must never
+# reach the (public) GitHub remote. Keep local-only.
+/docs/NATIVE_WEB_DEPLOY_RUNBOOK.md

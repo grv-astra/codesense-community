@@ -1,0 +1,71 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      CODESENSE_DATA_DIR: /data
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-*}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-}
+      COSIGN_KEY_DIR: /data/keys
+      # Fixed passphrase for the offline SBOM-signing key pair -- without it,
+      # `cosign generate-key-pair`/`sign-blob` prompt interactively for a
+      # password to encrypt/decrypt the private key, which has no TTY to
+      # read from in a container and fails ("inappropriate ioctl for
+      # device"). Matches the constant the desktop Tauri build already uses
+      # (client/src-tauri/src/main.rs, COSIGN_PASSWORD) for the same reason.
+      COSIGN_PASSWORD: "codesense-offline-sbom-signing"
+      # GRYPE_DB_CACHE_DIR intentionally NOT overridden here -- the bundled
+      # vulnerability DB is baked into the image at /app/vendor/grype-db
+      # (server/Dockerfile), which is where GRYPE_DB_CACHE_DIR already
+      # points by default. Overriding it to a path under /data would point
+      # grype at the empty runtime volume instead of the actual bundled DB.
+      # llama-server runs natively on the HOST (not in a container) --
+      # 127.0.0.1 from inside this container means "this container", not
+      # the host, so host.docker.internal (Docker's host-gateway alias) is
+      # required. Must match the --alias/--api-key llama-server was started
+      # with, and LLM_MODEL_MODE=instruct since this is the instruct model
+      # (--jinja implies chat-template rendering, not raw FIM completion).
+      # VLLM_API_KEY must be supplied at runtime (env or .env) and match the
+      # key llama-server was started with -- no default is baked in here.
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://host.docker.internal:8001}
+      VLLM_MODEL: ${VLLM_MODEL:-astra-code-reviewer}
+      VLLM_API_KEY: ${VLLM_API_KEY:?VLLM_API_KEY must be set (see .env)}
+      LLM_MODEL_MODE: ${LLM_MODEL_MODE:-instruct}
+      TRIAL_MODE: "true"
+      TRIAL_SCAN_LIMIT: "2"
+    volumes:
+      - codesense_data:/data
+    expose:
+      - "8585"
+    extra_hosts:
+      # host.docker.internal resolves automatically on Docker Desktop
+      # (Windows/Mac, this dev machine); native Linux Docker Engine (the
+      # likely real client-VM target) needs this explicit mapping instead.
+      # Harmless no-op where it's already automatic.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+      args:
+        VITE_BACKEND_URL: ""
+    expose:
+      - "3000"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  codesense_data:

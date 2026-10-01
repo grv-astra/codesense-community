@@ -1,0 +1,41 @@
+# CodeSense — Code Scan (Repository Clone Mode)
+#
+# Alternative mode: CodeSense clones the repository itself instead of
+# receiving an uploaded zip. Requires the CodeSense instance to have network
+# access to your git host. Scans a fresh clone of the pushed branch, not
+# necessarily the pipeline's exact checkout.
+#
+# Required secret pipeline variables:
+#   CODESENSE_API_URL     - e.g. http://<vm-ip>:8080
+#   CODESENSE_API_KEY     - the csk_... key from Project > Settings > CI API Keys
+#   CODESENSE_PROJECT_ID  - the project ID the key is bound to
+#   CODESENSE_GIT_TOKEN   - a token with read access to the repo
+#   CODESENSE_GIT_OWNER   - the repo owner/organization
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Trigger CodeSense scan via repo clone'
+    inputs:
+      targetType: inline
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $uri  = "$(CODESENSE_API_URL)/api/scans/github/"
+        $body = @{
+          token      = "$(CODESENSE_GIT_TOKEN)"
+          username   = "$(CODESENSE_GIT_OWNER)"
+          repo       = "$(Build.Repository.Name)"
+          branch     = "$(Build.SourceBranchName)"
+          project_id = "$(CODESENSE_PROJECT_ID)"
+        } | ConvertTo-Json
+
+        # Plain JSON body, not a file upload -- standard Invoke-RestMethod
+        # works unmodified on Windows PowerShell 5.1 here (no -Form needed).
+        try {
+          $response = Invoke-RestMethod -Uri $uri -Method Post -Body $body `
+            -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $(CODESENSE_API_KEY)" }
+          Write-Host "CodeSense scan submitted: $($response | ConvertTo-Json -Compress)"
+        } catch {
+          Write-Error "CodeSense scan submission failed: $($_.Exception.Message)"
+          exit 1
+        }

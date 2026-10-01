@@ -1,0 +1,439 @@
+import { useState, useEffect } from 'react';
+import { Clock, Calendar, Shield, CheckCircle, AlertTriangle, Activity, Code, Layers, PauseCircle, XCircle } from 'lucide-react';
+import { AxiosError } from 'axios';
+import { toast } from 'sonner';
+import { formatTimestamp, formatDuration } from '@/utils/timestampFormater';
+import { SEVERITY_ORDER } from '@/types/scan';
+import type { ScanDetails } from '@/types/scan';
+import { Button } from '@/components/atomic/button';
+import { ConfirmDialog } from '@/components/atomic/dialog-confirm';
+import { SecurityBadge } from '@/components/atomic/enum-badge';
+import { useCancelScan, useResumeScan } from '@/hooks/use-scans';
+import { ScanProgressPanel } from './ScanProgress/ScanProgressPanel';
+
+interface ScanUpdateProps {
+  scan?: ScanDetails;
+}
+
+type ConfigComponent = {
+  color: string,
+  bgColor: string,
+  borderColor: string,
+  icon: React.ReactElement,
+  progressColor: string
+}
+
+interface ConfigLayout {
+  completed: ConfigComponent,
+  failed: ConfigComponent,
+  in_progress: ConfigComponent,
+  interrupted: ConfigComponent,
+  cancelled: ConfigComponent,
+  cancelling: ConfigComponent,
+  default   : ConfigComponent
+}
+
+function extractErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof AxiosError && error.response?.data?.detail) {
+    return error.response.data.detail;
+  }
+  return fallback;
+}
+ 
+function ScanUpdate({ scan }: ScanUpdateProps) {
+  const [animatedProgress, setAnimatedProgress] = useState(0);
+ 
+  const defaultScan: ScanDetails = {
+    id: "6895a4aafd752429c18740bb",
+    project_id: "68874418e816acffbf7c7729",
+    scan_name: "HDBFS Security Scan",
+    status: "in_progress",
+    created_at: "2025-08-08T07:18:02.223",
+    triggered_by: "68863cf8ee93d4964a00d585",
+    total_files: 353,
+    files_scanned: 142,
+    findings: 7,
+    end_time: null,
+    metrics: {
+      total_functions: 0,
+      total_loc: 0,
+      languages: []
+    },
+  };
+ 
+  // The live in_progress/queued view is owned by ScanProgressPanel now (real
+  // per-item progress, no estimation). This is only for the terminal circle
+  // below: a terminal scan's percentage is trivially binary, no phase-band
+  // math needed.
+  function terminalPhaseLabel(status: string): string {
+    switch (status) {
+      case 'completed': return 'Scan Complete';
+      case 'failed': return 'Scan Failed';
+      case 'cancelled': return 'Scan Cancelled';
+      case 'interrupted': return 'Scan Interrupted';
+      default: return `Scan ${status}`;
+    }
+  }
+
+  const currentScan = scan || defaultScan;
+  const percentage = currentScan.status === 'completed' ? 100 : 0;
+
+  // A cancel click flips cancel_requested immediately, but `status` itself
+  // doesn't change until the pipeline thread actually notices and stops --
+  // which can lag well behind the click since in-flight LLM calls can't be
+  // forcibly interrupted (see ScanCancelView). Without this, the click
+  // appeared to do nothing: the mutation resolves almost instantly, the
+  // button reverts to "Cancel Scan", and the progress UI keeps showing
+  // completely normal in_progress movement for however long the stop
+  // actually takes.
+  const isCancelling = Boolean(currentScan.cancel_requested)
+    && (currentScan.status === 'in_progress' || currentScan.status === 'queued');
+  const displayStatus = isCancelling ? 'cancelling' : currentScan.status;
+  const currentPhase = isCancelling ? 'Cancelling…' : terminalPhaseLabel(currentScan.status);
+
+  const cancelScanMutation = useCancelScan();
+  const resumeScanMutation = useResumeScan();
+
+  const canCancel = currentScan.status === 'queued' || currentScan.status === 'in_progress';
+  const canResume = currentScan.status === 'interrupted' || currentScan.status === 'cancelled';
+
+  const handleCancel = () => {
+    cancelScanMutation.mutate(currentScan.id, {
+      onError: (error) => {
+        toast('Cancel failed', { description: extractErrorMessage(error, 'Could not cancel the scan. Please try again.') });
+      },
+    });
+  };
+
+  const handleResume = () => {
+    resumeScanMutation.mutate(currentScan.id, {
+      onError: (error) => {
+        toast('Resume failed', { description: extractErrorMessage(error, 'Could not resume the scan. Please try again.') });
+      },
+    });
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setAnimatedProgress(percentage);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [percentage]);
+ 
+  const getStatusConfig = (status: any) => {
+    const configs: ConfigLayout = {
+      completed: {
+        color: 'text-green-600',
+        bgColor: 'bg-green-600/10',
+        borderColor: 'border-green-600/20',
+        icon: <CheckCircle className="w-5 h-5" />,
+        progressColor: 'bg-green-600'
+      },
+      failed: {
+        color: 'text-red-600',
+        bgColor: 'bg-red-600/10',
+        borderColor: 'border-red-600/20',
+        icon: <AlertTriangle className="w-5 h-5" />,
+        progressColor: 'bg-red-600'
+      },
+      in_progress: {
+        color: 'text-blue-600',
+        bgColor: 'bg-blue-600/10',
+        borderColor: 'border-blue-600/20',
+        icon: <Activity className="w-5 h-5 animate-pulse" />,
+        progressColor: 'bg-blue-600'
+      },
+      interrupted: {
+        color: 'text-amber-600',
+        bgColor: 'bg-amber-600/10',
+        borderColor: 'border-amber-600/20',
+        icon: <PauseCircle className="w-5 h-5" />,
+        progressColor: 'bg-amber-600'
+      },
+      cancelled: {
+        color: 'text-[#404040] dark:text-[#a3a3a3]',
+        bgColor: 'bg-[#404040]/10',
+        borderColor: 'border-[#404040]/20',
+        icon: <XCircle className="w-5 h-5" />,
+        progressColor: 'bg-[#404040]'
+      },
+      cancelling: {
+        color: 'text-amber-600',
+        bgColor: 'bg-amber-600/10',
+        borderColor: 'border-amber-600/20',
+        icon: <XCircle className="w-5 h-5 animate-pulse" />,
+        progressColor: 'bg-amber-600'
+      },
+      default: {
+        color: 'text-[#2d2d2d] dark:text-[#e5e5e5]',
+        bgColor: 'bg-[#e5e5e5] dark:bg-[#2d2d2d]/50',
+        borderColor: 'border-[#e5e5e5] dark:border-[#404040]',
+        icon: <Clock className="w-5 h-5" />,
+        progressColor: 'bg-[#2d2d2d]'
+      }
+    };
+    return configs[status] || configs.default;
+  };
+ 
+  const statusConfig = getStatusConfig(displayStatus);
+  const circumference = 2 * Math.PI * 85;
+  const strokeDashoffset = circumference - (animatedProgress / 100) * circumference;
+ 
+  return (
+    <div className=" p-6">
+      <div className="max-w-8xl mx-auto space-y-6">
+       
+        {/* Header Card */}
+        <div className=" rounded-2xl shadow-lg border border-[#e5e5e5] dark:border-[#404040] p-8">
+          <div className="flex items-start justify-between">
+            <div>
+              <div className="flex items-center gap-3 mb-2">
+                <div className={`p-2 rounded-xl ${statusConfig.bgColor} ${statusConfig.color}`}>
+                  <Shield className="w-6 h-6" />
+                </div>
+                <h1 className="text-3xl font-bold text-[#2d2d2d] dark:text-white">
+                  {currentScan.scan_name}
+                </h1>
+              </div>
+              <p className="text-sm text-gray-500 dark:text-gray-400 font-mono">
+                ID: {currentScan.id}
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className={`flex items-center gap-2 px-4 py-2 rounded-full ${statusConfig.bgColor} border ${statusConfig.borderColor}`}>
+                <span className={statusConfig.color}>{statusConfig.icon}</span>
+                <span className={`text-sm font-semibold capitalize ${statusConfig.color}`}>
+                  {isCancelling ? 'Cancelling' : currentScan.status.replace('_', ' ')}
+                </span>
+              </div>
+
+              {canCancel && (
+                <ConfirmDialog
+                  trigger={
+                    <Button variant="outline" size="sm" disabled={cancelScanMutation.isPending || isCancelling}>
+                      {cancelScanMutation.isPending || isCancelling ? 'Cancelling…' : 'Cancel Scan'}
+                    </Button>
+                  }
+                  title="Cancel this scan?"
+                  description="The scan will stop as soon as possible. You'll be able to resume it later without losing findings already found."
+                  confirmLabel="Cancel Scan"
+                  cancelLabel="Keep Scanning"
+                  onConfirm={handleCancel}
+                />
+              )}
+
+              {canResume && (
+                <Button size="sm" disabled={resumeScanMutation.isPending} onClick={handleResume}>
+                  {resumeScanMutation.isPending ? 'Resuming…' : 'Resume Scan'}
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Error Banner — only when there's actually something to explain */}
+        {(currentScan.status === 'failed' || currentScan.status === 'interrupted') && currentScan.error && (
+          <div className="rounded-2xl border border-red-200 dark:border-red-900/40 bg-red-50 dark:bg-red-950/20 p-5 flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="text-sm font-semibold text-red-700 dark:text-red-400">
+                {currentScan.status === 'failed' ? 'Scan failed' : 'Scan interrupted'}
+              </div>
+              <p className="text-sm text-red-600 dark:text-red-400/90 mt-1">{currentScan.error}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Main Content Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+         
+          {/* Progress Circle Card */}
+          <div className="lg:col-span-1">
+            {currentScan.status === 'queued' || currentScan.status === 'in_progress' ? (
+              <ScanProgressPanel scan={currentScan} isCancelling={isCancelling} />
+            ) : (
+            <div className=" rounded-2xl shadow-lg border border-[#e5e5e5] dark:border-[#404040] p-8 h-full">
+              <h2 className="text-lg font-semibold text-[#2d2d2d] dark:text-white mb-6">
+                Scan Progress
+              </h2>
+
+              <div className="flex flex-col items-center justify-center">
+                {/* Circular Progress */}
+                <div className="relative mb-6">
+                  <svg className="w-52 h-52 transform -rotate-90" viewBox="0 0 200 200">
+                    {/* Background Circle */}
+                    <circle
+                      cx="100"
+                      cy="100"
+                      r="85"
+                      stroke="currentColor"
+                      className="text-[#e5e5e5] dark:text-[#404040]"
+                      strokeWidth="12"
+                      fill="none"
+                    />
+                    {/* Progress Circle */}
+                    <circle
+                      cx="100"
+                      cy="100"
+                      r="85"
+                      stroke="#bf0000"
+                      strokeWidth="12"
+                      fill="none"
+                      strokeLinecap="round"
+                      strokeDasharray={circumference}
+                      strokeDashoffset={strokeDashoffset}
+                      className="transition-all duration-1000 ease-out"
+                    />
+                  </svg>
+                 
+                  {/* Center Content */}
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="text-center">
+                      <div className="text-5xl font-bold text-[#404040] dark:text-[#e5e5e5] mb-1">
+                        {Math.round(animatedProgress)}%
+                      </div>
+                      <div className="text-sm text-gray-500 dark:text-gray-400 font-medium">
+                        Completed
+                      </div>
+                    </div>
+                  </div>
+                </div>
+ 
+                {/* Phase Info */}
+                <div className="text-center w-full">
+                  <div className={`inline-flex items-center gap-2 px-4 py-2 rounded-full ${statusConfig.bgColor} mb-3`}>
+                    <div className={`w-2 h-2 rounded-full bg-[#bf0000] animate-pulse ${statusConfig.progressColor}`}></div>
+                    <span className={`text-sm font-semibold ${statusConfig.color}`}>
+                      {currentPhase}
+                    </span>
+                  </div>
+                 
+                  {currentScan.status === 'in_progress' && (
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      {currentScan.files_scanned} / {currentScan.total_files} files
+                    </p>
+                  )}
+                </div>
+ 
+                {/* Progress Bar */}
+                <div className="w-full mt-6">
+                  <div className="h-2 bg-[#e5e5e5] dark:bg-[#404040] rounded-full overflow-hidden">
+                    <div
+                      className={`h-full ${statusConfig.progressColor} transition-all duration-1000 ease-out rounded-full`}
+                      style={{ width: `${animatedProgress}%` }}
+                    ></div>
+                  </div>
+                  {currentScan.status === 'in_progress' && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-2 text-center">
+                      {currentScan.total_files - currentScan.files_scanned} files remaining
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+            )}
+          </div>
+
+          {/* Stats Cards */}
+          <div className="lg:col-span-2 space-y-6">
+           
+            {/* Scan Stats Grid */}
+            <div className="rounded-2xl shadow-lg border border-[#e5e5e5] dark:border-[#404040] p-6 grid lg:grid-cols-3 gap-4">
+              <div className="bg-[#bf0000]/20 rounded-xl shadow-lg p-5 transform transition-transform hover:scale-105">
+                <div className="flex justify-between gap-3 mb-2">
+                  <div className="text-sm opacity-90 font-medium">Findings</div>
+                  <div className="p-2 bg-[#bf0000]/10 rounded-lg"><AlertTriangle className="w-8 h-8 text-[#bf0000]" /></div>
+                </div>
+                <div className="text-3xl font-bold mb-2">{currentScan.findings}</div>
+                {currentScan.severity_counts && (
+                  <div className="flex flex-wrap gap-2">
+                    {SEVERITY_ORDER.filter(sev => (currentScan.severity_counts?.[sev] ?? 0) > 0).map(sev => (
+                      <span key={sev} className="flex items-center gap-1">
+                        <SecurityBadge severity={sev} size="sm" />
+                        <span className="text-xs font-semibold">{currentScan.severity_counts?.[sev]}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-[#bf0000]/20 rounded-xl shadow-lg p-5 transform transition-transform hover:scale-105">
+                <div className="flex justify-between gap-3 mb-2">
+                  <div className="text-sm font-medium opacity-90">
+                    {currentScan.status === 'in_progress' ? 'Running For' : 'Duration'}
+                  </div>
+                  <div className="p-2 bg-[#bf0000]/10 rounded-lg"><Clock className="w-8 h-8 text-[#bf0000]" /></div>
+                </div>
+                <div className="text-3xl font-bold mb-1">{formatDuration(currentScan)}</div>
+              </div>
+
+              <div className="bg-[#bf0000]/20 rounded-xl shadow-lg p-5 transform transition-transform hover:scale-105">
+                <div className="flex justify-between gap-3 mb-2">
+                  <div className="text-sm font-medium opacity-90">Started</div>
+                  <div className="p-2 bg-[#bf0000]/10 rounded-lg"><Calendar className="w-8 h-8 text-[#bf0000]" /></div>
+                </div>
+                <div className="text-base font-semibold">{formatTimestamp(currentScan.created_at)}</div>
+              </div>
+            </div>
+ 
+            {/* Code Analysis Stats — size/composition only, not a risk signal, so it's
+                deliberately lower-emphasis than the Findings/Duration/Started stats above. */}
+            <div className="bg-white dark:bg-[#2d2d2d] rounded-2xl border border-[#e5e5e5] dark:border-[#404040] p-6">
+              <h2 className="text-base font-medium text-[#404040] dark:text-[#a3a3a3] mb-1 flex items-center gap-2">
+                <Code className="w-4 h-4" />
+                Code Analysis Overview
+              </h2>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                Size and composition of the scanned code — not a security signal.
+              </p>
+
+              <div className="grid lg:grid-cols-2 xl:grid-cols-3 gap-4">
+                <div className="p-4 bg-[#e5e5e5] dark:bg-[#1a1a1a] rounded-xl border border-[#e5e5e5] dark:border-[#404040]">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="p-2 bg-[#bf0000]/10 rounded-lg">
+                      <Layers className="w-5 h-5 text-[#bf0000]" />
+                    </div>
+                    <div className="text-2xl font-bold text-[#2d2d2d] dark:text-white">
+                      {currentScan.metrics.total_loc}
+                    </div>
+                  </div>
+                  <div className="text-sm text-gray-600 dark:text-gray-400 font-medium">Lines of Code</div>
+                </div>
+               
+                <div className="p-4 bg-[#e5e5e5] dark:bg-[#1a1a1a] rounded-xl border border-[#e5e5e5] dark:border-[#404040]">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="p-2 bg-[#bf0000]/10 rounded-lg">
+                      <Code className="w-5 h-5 text-[#bf0000]" />
+                    </div>
+                    <div className="text-2xl font-bold text-[#2d2d2d] dark:text-white">
+                      {currentScan.metrics.total_functions}
+                    </div>
+                  </div>
+                  <div className="text-sm text-gray-600 dark:text-gray-400 font-medium">Total Functions</div>
+                </div>
+               
+                <div className="p-4 bg-[#e5e5e5] dark:bg-[#1a1a1a] rounded-xl border border-[#e5e5e5] dark:border-[#404040]">
+                  <div className="text-sm text-gray-600 dark:text-gray-400 font-medium mb-2">Languages</div>
+                    <div className='flex flex-wrap gap-2'>
+                      {
+                        currentScan.metrics.languages.map((lang) => (
+                          <span key={lang} className='bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-2xl capitalize'>
+                            {lang}
+                          </span>
+                        ))
+                      }
+                    </div>
+                     
+                </div>
+ 
+              </div>
+            </div>
+ 
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+ 
+export default ScanUpdate;

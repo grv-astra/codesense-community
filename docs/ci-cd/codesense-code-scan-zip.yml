@@ -1,0 +1,66 @@
+# CodeSense — Code Scan (Zip Upload Mode)
+#
+# Recommended mode: packages the pipeline's exact checkout and uploads it
+# directly to CodeSense, so it scans precisely what the pipeline built.
+#
+# Verified working on a real Azure DevOps pipeline 2026-08-13.
+#
+# Required secret pipeline variables:
+#   CODESENSE_API_URL     - e.g. http://<vm-ip>:8080  (leave unset if unreachable from CI)
+#   CODESENSE_API_KEY     - the csk_... key from Project > Settings > CI API Keys
+#   CODESENSE_PROJECT_ID  - the project ID the key is bound to
+
+pool: Default
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Package workspace for Code Sense scan'
+    inputs:
+      targetType: inline
+      script: |
+        Compress-Archive -Path "$(Build.SourcesDirectory)\*" -DestinationPath "$(Build.ArtifactStagingDirectory)\codesense-scan.zip" -Force
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish scan payload as a pipeline artifact'
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)\codesense-scan.zip'
+      artifact: 'codesense-scan-payload'
+
+  - task: PowerShell@2
+    displayName: 'Submit scan to Code Sense'
+    condition: ne(variables['CODESENSE_API_URL'], '')
+    inputs:
+      targetType: inline
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $zipPath = "$(Build.ArtifactStagingDirectory)\codesense-scan.zip"
+        $uri = "$(CODESENSE_API_URL)/api/scans/create/"
+
+        Add-Type -AssemblyName System.Net.Http
+
+        $client = New-Object System.Net.Http.HttpClient
+        $fileStream = $null
+        try {
+            $client.DefaultRequestHeaders.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "$(CODESENSE_API_KEY)")
+
+            $content = New-Object System.Net.Http.MultipartFormDataContent
+            $content.Add((New-Object System.Net.Http.StringContent("$(Build.Repository.Name)-$(Build.SourceBranchName)")), "scan_name")
+            $content.Add((New-Object System.Net.Http.StringContent("$(CODESENSE_PROJECT_ID)")), "project_id")
+
+            $fileStream = [System.IO.File]::OpenRead($zipPath)
+            $fileContent = New-Object System.Net.Http.StreamContent($fileStream)
+            $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/zip")
+            $content.Add($fileContent, "zip_file", [System.IO.Path]::GetFileName($zipPath))
+
+            $response = $client.PostAsync($uri, $content).GetAwaiter().GetResult()
+            $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+
+            if (-not $response.IsSuccessStatusCode) {
+                Write-Error "Code Sense scan submission failed: $($response.StatusCode) $body"
+                exit 1
+            }
+            Write-Host "Code Sense scan submitted: $body"
+        } finally {
+            if ($fileStream) { $fileStream.Dispose() }
+            $client.Dispose()
+        }

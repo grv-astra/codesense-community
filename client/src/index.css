@@ -1,0 +1,306 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Static brand tokens — single source (was client/tailwind.config.js).
+   Tailwind v4 is CSS-first: these generate color and font utilities directly,
+   so no hand-rolled .brand- classes are needed. */
+@theme {
+  /* Numbered red scale — used as bg-primary-100, text-primary-600 through 950,
+     dark:text-primary-200 and -300. `primary` with no number stays the themed
+     shadcn token defined in the @theme inline block below. */
+  --color-primary-50: #fef2f2;
+  --color-primary-100: #fee2e2;
+  --color-primary-200: #fecaca;
+  --color-primary-300: #fca5a5;
+  --color-primary-400: #f87171;
+  --color-primary-500: #ef4444;
+  --color-primary-600: #dc2626;
+  --color-primary-700: #b91c1c;
+  --color-primary-800: #991b1b;
+  --color-primary-900: #7f1d1d;
+  --color-primary-950: #bf0000;
+
+  /* Brand palette — sidebar badge variants (bg-brand-red, bg-brand-dark,
+     text-brand-light, border-brand-light). */
+  --color-brand-red: #bf0000;
+  --color-brand-dark: #2d2d2d;
+  --color-brand-light: #e5e5e5;
+  --color-brand-white: #ffffff;
+
+  /* Wordmark face — font-custom on the sidebar header. */
+  --font-custom: 'Chakra', sans-serif;
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-dialog: var(--dialog);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Severity ramp — the app's shared visual language for finding severity.
+     Same five steps, same order, everywhere: bars, the hero ramp, badges,
+     detail-page accents. Consumed as bg-sev and text-sev colour utilities,
+     and in recharts via useChartTokens(), which reads the raw sev vars. */
+  --color-sev-critical: var(--sev-critical);
+  --color-sev-high: var(--sev-high);
+  --color-sev-medium: var(--sev-medium);
+  --color-sev-low: var(--sev-low);
+  --color-sev-info: var(--sev-info);
+
+  /* Neutral graphite ramp for non-severity data series (scan source, language
+     volume) — deliberately not rainbow. Ordered darkest-to-lightest in light
+     mode, inverted in dark. */
+  --color-data-1: var(--data-1);
+  --color-data-2: var(--data-2);
+  --color-data-3: var(--data-3);
+  --color-data-4: var(--data-4);
+}
+
+:root {
+  /* Custom Color Palette */
+  /* #ffffff - White */
+  /* #e5e5e5 - Light Gray */  
+  /* #2d2d2d - Dark Gray */
+  /* #bf0000 - Red */
+  
+  --radius: 0.625rem;
+  --background: #F0F0F0; /* White #ffffff */
+  --dialog: #f0f0f0;
+  --foreground: oklch(0.225 0 0); /* Dark Gray #2d2d2d */
+  --card: oklch(1 0 0); /* White #ffffff */
+  --card-foreground: oklch(0.225 0 0); /* Dark Gray #2d2d2d */
+  --popover: #dedede; /* White #ffffff */
+  --popover-foreground: oklch(0.225 0 0); /* Dark Gray #2d2d2d */
+  --primary: oklch(0.385 0.245 27.325); /* Red #bf0000 */
+  --primary-foreground: oklch(1 0 0); /* White #ffffff */
+  --secondary: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --secondary-foreground: oklch(0.225 0 0); /* Dark Gray #2d2d2d */
+  --muted: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --muted-foreground: oklch(0.5 0 0); /* Medium Gray */
+  --accent: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --accent-foreground: oklch(0.225 0 0); /* Dark Gray #2d2d2d */
+  --destructive: oklch(0.385 0.245 27.325); /* Red #bf0000 */
+  --border: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --input: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --ring: oklch(0.385 0.245 27.325); /* Red #bf0000 */
+  --chart-1: oklch(0.385 0.245 27.325); /* Red #bf0000 */
+  --chart-2: oklch(0.6 0.118 184.704); /* Blue variation */
+  --chart-3: oklch(0.398 0.07 227.392); /* Purple variation */
+  --chart-4: oklch(0.828 0.189 84.429); /* Green variation */
+  --chart-5: oklch(0.769 0.188 70.08); /* Orange variation */
+  --sidebar: #dedede; /* Slightly off-white */
+  --sidebar-foreground: oklch(0.225 0 0); /* Dark Gray #2d2d2d */
+  --sidebar-primary: oklch(0.385 0.245 27.325); /* Red #bf0000 */
+  --sidebar-primary-foreground: oklch(1 0 0); /* White #ffffff */
+  --sidebar-accent: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --sidebar-accent-foreground: oklch(0.225 0 0); /* Dark Gray #2d2d2d */
+  --sidebar-border: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --sidebar-ring: oklch(0.385 0.245 27.325); /* Red #bf0000 */
+
+  /* Severity ramp — light. critical deep oxblood, high signal red, medium a
+     true orange, low a dark brass (distinct from medium in hue), info graphite.
+     "low" is a graded finding, not "good" — no green. */
+  --sev-critical: #7f1d1d;
+  --sev-high: #dc2626;
+  --sev-medium: #ea7317;
+  --sev-low: #a16207;
+  --sev-info: #6b7280;
+
+  /* Neutral data ramp — light (dark graphite → light) */
+  --data-1: #374151;
+  --data-2: #6b7280;
+  --data-3: #9ca3af;
+  --data-4: #d1d5db;
+
+  /* Chart chrome */
+  --chart-axis: #6b7280;
+  --chart-grid: #e5e7eb;
+  --chart-tooltip-bg: #ffffff;
+  --chart-tooltip-border: #e5e7eb;
+}
+
+.dark {
+  /* Dark mode using inverted color scheme */
+  --background: #595959; /* Dark Gray #2d2d2d */
+  --dialog: #222222;
+  --foreground: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --card: oklch(0.3 0 0); /* Slightly lighter than background */
+  --card-foreground: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --popover: oklch(0.3 0 0); /* Slightly lighter than background */
+  --popover-foreground: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --primary: oklch(0.45 0.28 27.325); /* Brighter Red for dark mode */
+  --primary-foreground: oklch(1 0 0); /* White #ffffff */
+  --secondary: oklch(0.4 0 0); /* Darker secondary */
+  --secondary-foreground: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --muted: oklch(0.4 0 0); /* Darker muted */
+  --muted-foreground: oklch(0.7 0 0); /* Medium light gray */
+  --accent: oklch(0.4 0 0); /* Darker accent */
+  --accent-foreground: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --destructive: oklch(0.45 0.28 27.325); /* Brighter Red for dark mode */
+  --border: oklch(0.4 0 0); /* Darker border */
+  --input: oklch(0.35 0 0); /* Darker input background */
+  --ring: oklch(0.45 0.28 27.325); /* Brighter Red for dark mode */
+  --chart-1: oklch(0.45 0.28 27.325); /* Brighter Red */
+  --chart-2: oklch(0.696 0.17 162.48); /* Adjusted blue */
+  --chart-3: oklch(0.769 0.188 70.08); /* Adjusted orange */
+  --chart-4: oklch(0.627 0.265 303.9); /* Adjusted purple */
+  --chart-5: oklch(0.645 0.246 16.439); /* Adjusted red-orange */
+  --sidebar: #2d2d2d; /* Slightly lighter than background */
+  --sidebar-foreground: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --sidebar-primary: oklch(0.45 0.28 27.325); /* Brighter Red for dark mode */
+  --sidebar-primary-foreground: oklch(1 0 0); /* White #ffffff */
+  --sidebar-accent: oklch(0.4 0 0); /* Darker accent */
+  --sidebar-accent-foreground: oklch(0.9 0 0); /* Light Gray #e5e5e5 */
+  --sidebar-border: oklch(0.4 0 0); /* Darker border */
+  --sidebar-ring: oklch(0.45 0.28 27.325); /* Brighter Red for dark mode */
+
+  /* Severity ramp — dark. Lifted for contrast against the #262626/#333 panels;
+     hue order preserved so a bar reads the same as in light mode. critical
+     stays a deeper red than high so the two don't blur together. */
+  --sev-critical: #dc2626;
+  --sev-high: #f87171;
+  --sev-medium: #fb923c;
+  --sev-low: #facc15;
+  --sev-info: #9ca3af;
+
+  /* Neutral data ramp — dark (light → dark graphite) */
+  --data-1: #e5e7eb;
+  --data-2: #9ca3af;
+  --data-3: #6b7280;
+  --data-4: #4b5563;
+
+  /* Chart chrome */
+  --chart-axis: #9ca3af;
+  --chart-grid: #3a3a3a;
+  --chart-tooltip-bg: #1f1f1f;
+  --chart-tooltip-border: #3a3a3a;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  /* a11y floor — visible keyboard focus on every interactive control, and
+     honour the OS "reduce motion" setting (kills the sidebar hover-slide and
+     any transition/animation) without disabling functional state changes. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: 'WF Visual Sans', system-ui, Arial, Helvetica, sans-serif;
+}
+
+/* woff2 first (≈35% smaller, universally supported), ttf as the fallback source.
+   font-display: swap paints text immediately in the fallback face and swaps when
+   the web font arrives — no invisible-text (FOIT) delay. */
+@font-face {
+  font-family: 'Chakra';
+  src: url('/fonts/Chakra-Petch/ChakraPetch-Medium.woff2') format('woff2'),
+       url('/fonts/Chakra-Petch/ChakraPetch-Medium.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'WF Visual Sans';
+  src: url('/fonts/WF-Sans/Regular.woff2') format('woff2'),
+       url('/fonts/WF-Sans/Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'WF Visual Sans';
+  src: url('/fonts/WF-Sans/Medium.woff2') format('woff2'),
+       url('/fonts/WF-Sans/Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'WF Visual Sans';
+  src: url('/fonts/WF-Sans/SemiBold.woff2') format('woff2'),
+       url('/fonts/WF-Sans/SemiBold.ttf') format('truetype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+.scrollbar{
+  overflow: hidden;
+}
+/* width */
+::-webkit-scrollbar {
+  width: 5px;
+  margin: 5px;
+}
+
+/* Track */
+::-webkit-scrollbar-track {
+  box-shadow: inset 0 0 5px #888888; 
+  border-radius: 10px;
+  margin: 5px;
+}
+ 
+/* Handle */
+::-webkit-scrollbar-thumb {
+  background: #888888; 
+  border-radius: 10px;
+  margin: 5px;
+}

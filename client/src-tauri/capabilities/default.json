@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core defaults for the main window, needed for the first-run asset-setup event listeners. Sidecar spawning (codesense-server/llama-server) happens entirely on the Rust side via app.shell().sidecar(...), which the ACL doesn't gate, so no shell:* permissions are granted to the frontend.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default"
+  ]
+}
