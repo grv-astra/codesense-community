@@ -43,7 +43,7 @@ class ScanService extends BaseApiClient {
   }
 
   async startGithubScan(data: CreateGithubScans): Promise<ScanDetails> {
-    return this.post<ScanDetails>("api/scans/create/", data);
+    return this.post<ScanDetails>("api/scans/github/", data);
   }
 
   async getScanByProject(projectId: string, params?: { type?: string, page?: number; limit?: number; search?: string }): Promise<ScanListResponse | SbomScanListResponse> {
