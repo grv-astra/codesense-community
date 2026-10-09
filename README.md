@@ -52,8 +52,10 @@ scripts in `scripts/offline_sbom/` (`fetch_offline_tools.sh`, `stage_semgrep_rul
 - **Run from source (Windows):** create `server/.venv` and install the requirements,
   stage the tools, then run `server\run_dev.ps1` (backend on port 8586). For the
   UI, from `client/` run `npm install`, then
-  `VITE_BACKEND_URL=http://localhost:8586 npx vite --port 8282`. A fresh data
-  directory opens the first-run setup wizard.
+  `VITE_BACKEND_URL=http://localhost:8586 npx vite --port 5173` (the backend only
+  accepts browser requests from 5173 by default; for another port set
+  `DJANGO_CORS_ALLOWED_ORIGINS`). A fresh data directory opens the first-run setup
+  wizard at `/setup`.
 - **Server deployment:** `docker-compose.yml` and `docs/ci-cd/`.
 
 ## Tests
