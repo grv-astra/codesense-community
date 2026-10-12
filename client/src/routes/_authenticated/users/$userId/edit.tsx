@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { toastApiError } from '@/lib/api-error';
 import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router';
 import { Card, CardHeader, CardTitle } from '@/components/atomic/card';
 import { useUpdateProfile, useUserProfile } from '@/hooks/use-user';
@@ -119,8 +120,7 @@ function RouteComponent() {
       // Navigate back to users list
       navigate({ to: '/users/list' });
     } catch (error) {
-      console.error('Error updating user:', error);
-      // Handle error - you might want to show a toast notification
+      toastApiError('Failed to update user', error);
     }
   };
 

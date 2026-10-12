@@ -1,4 +1,5 @@
 import { DotsLoader } from '@/components/atomic/loader';
+import { sbomDependencyStats } from '@/lib/sbom-stats';
 import { useSbomScanDetails } from '@/hooks/use-scans';
 import { useSbomLicenses } from '@/hooks/use-finding';
 import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router'
@@ -60,8 +61,8 @@ function SecurityDashboard() {
     return Math.round((end - start) / 1000);
   };
 
-  const affectedPercentage = ((scanData.vulnerabilities / scanData.dependencies_scanned) * 100).toFixed(1);
-  const cleanDependencies = scanData.dependencies_scanned - scanData.vulnerabilities;
+  const { affected: affectedDependencies, clean: cleanDependencies, affectedPercent: affectedPercentage, cleanPercent } =
+    sbomDependencyStats(scanData);
 
   const totalSeverity = Object.values(scanData.severity_counts).reduce((a, b) => a + b, 0);
 
@@ -155,7 +156,7 @@ function SecurityDashboard() {
                 <div className="text-3xl font-bold text-primary">{scanData.vulnerabilities}</div>
               </div>
               <h3 className="text-foreground font-semibold text-lg">Vulnerabilities</h3>
-              <p className="text-muted-foreground text-sm mt-1">{affectedPercentage}% of dependencies affected</p>
+              <p className="text-muted-foreground text-sm mt-1">{affectedDependencies} of {scanData.dependencies_scanned} dependencies affected ({affectedPercentage}%)</p>
             </div>
 
             <div className="bg-card rounded-xl border border-border p-6 hover:border-primary transition-colors">
@@ -343,7 +344,7 @@ function SecurityDashboard() {
                   {scanData.vulnerabilities} vulnerabilities were detected, including{' '}
                   <span className="font-semibold">{scanData.severity_counts.critical} critical</span> and{' '}
                   <span className="font-semibold">{scanData.severity_counts.high} high</span>-severity issues requiring immediate attention.{' '}
-                  {cleanDependencies} packages ({(100 - parseFloat(affectedPercentage)).toFixed(1)}%) were found to be clean.
+                  {cleanDependencies} packages ({cleanPercent}%) were found to be clean.
                 </p>
               </div>
             </div>

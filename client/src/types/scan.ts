@@ -56,6 +56,8 @@ export interface SbomScanDetails {
   vulnerabilities: number;
   total_files: number;
   dependencies_scanned: number;
+  /** Distinct vulnerable packages (`vulnerabilities` counts CVEs). Absent on older servers. */
+  affected_dependencies?: number;
   severity_counts: {
     critical: number,
     high: number,

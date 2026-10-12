@@ -1,4 +1,5 @@
 import { Card, CardHeader, CardTitle } from '@/components/atomic/card';
+import { toastApiError } from '@/lib/api-error';
 import { Input } from '@/components/atomic/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/atomic/select';
 import { useProjectNames } from '@/hooks/use-project';
@@ -135,7 +136,7 @@ function RouteComponent() {
       
             navigate({ from: '/scan/start', to: `../../project/${formData.project_id}` });
           } catch (error) {
-            console.error('Error creating user:', error);
+            toastApiError('Failed to start scan', error);
           }
           
         };

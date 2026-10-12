@@ -1,4 +1,5 @@
 import { Card } from '@/components/atomic/card';
+import { toastApiError } from '@/lib/api-error';
 import { Input } from '@/components/atomic/input';
 import {
   Select,
@@ -154,7 +155,7 @@ function RouteComponent() {
         });
       }, 800);
     } catch (err) {
-      console.error(err);
+      toastApiError('Failed to start scan', err);
     } finally {
       setIsSubmitting(false);
     }

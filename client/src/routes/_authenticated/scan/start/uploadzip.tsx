@@ -12,6 +12,7 @@ import type { SelectCardOption } from '@/components/atomic/select';
 import { useProjectNames } from '@/hooks/use-project';
 import { useCreateSbomScan, useCreateScan } from '@/hooks/use-scans';
 import { useTrialStatus, isTrialExhausted } from '@/hooks/use-trial';
+import { useEditionStatus } from '@/hooks/use-edition';
 import type { CreateScanDetails } from '@/types/scan';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { AxiosError } from 'axios';
@@ -106,6 +107,9 @@ function RouteComponent() {
 
   const { data: projects = [] } = useProjectNames();
   const [isDragOver, setIsDragOver] = useState(false);
+  const { data: edition } = useEditionStatus();
+  // Show the edition's real cap (Community: 250 MB), not a hard-coded number.
+  const maxCodebaseMb = edition?.limits.max_codebase_mb;
   const [errors, setErrors] = useState<FormErrors>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -381,7 +385,7 @@ function RouteComponent() {
                       <span className="text-[#bf0000] dark:text-red-400 underline underline-offset-2 decoration-dotted">
                         browse files
                       </span>{' '}
-                      &mdash; .zip only, up to 500 MB
+                      &mdash; .zip only{maxCodebaseMb ? `, up to ${maxCodebaseMb} MB` : ''}
                     </p>
                   </div>)
                 )}

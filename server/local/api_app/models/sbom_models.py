@@ -141,7 +141,16 @@ class SbomModel:
 
     @classmethod
     def find_by_id(cls, scan_id: str):
-        return cls.serialize(SbomScan.objects.filter(id=scan_id).first())
+        scan = cls.serialize(SbomScan.objects.filter(id=scan_id).first())
+        if scan is not None:
+            # `vulnerabilities` counts CVEs, which can exceed the package count (one
+            # package, many CVEs), so "packages with no issues" needs the distinct
+            # affected packages. Detail view only; list rows skip the extra query.
+            scan["affected_dependencies"] = (
+                SbomFinding.objects.filter(scan_id=scan_id)
+                .values("package_name", "package_version").distinct().count()
+            )
+        return scan
 
     @classmethod
     def find_by_project(cls, project_id: str, page=1, limit=10, search=""):

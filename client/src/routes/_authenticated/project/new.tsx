@@ -1,10 +1,12 @@
 // src/routes/_authenticated/project/new.tsx
 
 import React, { useState } from 'react';
+import { toastApiError } from '@/lib/api-error';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Input } from '@/components/atomic/input';
 import type { CreateProjectDetails } from '@/types/project';
 import { useCreateProject } from '@/hooks/use-project';
+import { limitReached, useEditionStatus } from '@/hooks/use-edition';
 import { Card } from '@/components/atomic/card';
 import { AlertCircle, CheckCircle2, FolderPlus, Info } from 'lucide-react';
 import {
@@ -76,6 +78,10 @@ function RouteComponent() {
   });
   const [errors, setErrors] = useState<Partial<CreateProjectDetails>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const { data: edition } = useEditionStatus();
+  // The server rejects the create with 403 at the edition's project cap; say so up front
+  // instead of letting the user fill the form and hit a dead end.
+  const atProjectLimit = limitReached(edition, 'projects');
   const [submitted, setSubmitted] = useState(false);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -111,7 +117,7 @@ function RouteComponent() {
         navigate({ from: '/project/new', to: '../list' });
       }, 800);
     } catch (error) {
-      console.error('Error creating project:', error);
+      toastApiError('Failed to create project', error);
     } finally {
       setIsSubmitting(false);
     }
@@ -142,6 +148,16 @@ function RouteComponent() {
 
             <form onSubmit={handleSubmit} noValidate>
               <div className="px-7 py-6 space-y-7">
+                {atProjectLimit && (
+                  <div role="alert" className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 dark:border-amber-500/40 dark:bg-amber-500/10 px-4 py-3 text-[13px] text-amber-900 dark:text-amber-200">
+                    <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
+                    <span>
+                      The {edition?.label} edition is limited to {edition?.limits.projects} project
+                      {edition?.limits.projects === 1 ? '' : 's'}, and you have reached it. Delete a project or
+                      upgrade to add another.
+                    </span>
+                  </div>
+                )}
                 <section>
                   <SectionHeading step={1} title="Project details" />
 
@@ -208,13 +224,15 @@ function RouteComponent() {
 
                 <button
                   type="submit"
-                  disabled={isSubmitting || submitted}
+                  disabled={isSubmitting || submitted || atProjectLimit}
                   className={[
                     'inline-flex items-center gap-2 px-5 h-10 rounded-lg text-[13px] font-semibold transition-all duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#bf0000]',
                     submitted
                       ? 'bg-emerald-600 text-white cursor-default'
                       : isSubmitting
                       ? 'bg-[#bf0000]/70 text-white cursor-wait'
+                      : atProjectLimit
+                      ? 'bg-gray-300 dark:bg-white/10 text-gray-500 dark:text-gray-400 cursor-not-allowed'
                       : 'bg-[#bf0000] hover:bg-[#a00000] active:scale-[0.98] text-white shadow-sm shadow-red-900/20',
                   ].join(' ')}
                 >

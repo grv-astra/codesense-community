@@ -3,6 +3,7 @@
 // src/routes/_authenticated/project/$projectId/edit.tsx
 
 import React, { useState, useEffect } from 'react';
+import { toastApiError } from '@/lib/api-error';
 import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router';
 import { Input } from '@/components/atomic/input';
 import type { CreateProjectDetails } from '@/types/project';
@@ -137,7 +138,7 @@ function RouteComponent() {
         navigate({ to: '/project/$projectId/settings', params: { projectId } });
       }, 800);
     } catch (error) {
-      console.error('Error updating project:', error);
+      toastApiError('Failed to update project', error);
     } finally {
       setIsSubmitting(false);
     }

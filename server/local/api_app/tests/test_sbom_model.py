@@ -48,6 +48,19 @@ class SbomModelTests(TestCase):
         SbomModel.update_scan_fields(s["id"], {"sbom_artifact": "/tmp/sbom.json"})
         # no crash; field persisted (not in serialize output, but stored)
 
+    def test_find_by_id_counts_distinct_affected_packages_not_cves(self):
+        # 4 CVEs across 2 distinct packages (one package has 3 CVEs): the UI derives
+        # "clean packages" from this, so it must be 2, not 4 (and never negative).
+        s = SbomModel.create({"project_id": "p", "scan_name": "SB"})
+        SbomModel.insert_findings([
+            {"scan_id": s["id"], "package_name": "flask", "package_version": "0.12", "cve_id": "CVE-1"},
+            {"scan_id": s["id"], "package_name": "flask", "package_version": "0.12", "cve_id": "CVE-2"},
+            {"scan_id": s["id"], "package_name": "flask", "package_version": "0.12", "cve_id": "CVE-3"},
+            {"scan_id": s["id"], "package_name": "pyyaml", "package_version": "3.12", "cve_id": "CVE-4"},
+        ])
+        self.assertEqual(SbomModel.find_by_id(s["id"])["affected_dependencies"], 2)
+        self.assertEqual(SbomModel.find_by_id(SbomModel.create({"project_id": "p", "scan_name": "E"})["id"])["affected_dependencies"], 0)
+
     def test_delete_scan_removes_findings(self):
         s = SbomModel.create({"project_id": "p", "scan_name": "SB"})
         SbomModel.insert_findings([{"scan_id": s["id"], "package_name": "a"}])

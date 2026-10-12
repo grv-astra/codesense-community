@@ -1,4 +1,5 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { toastApiError } from '@/lib/api-error';
 import { GenericTable, type TableColumn } from '@/components/molecule/generic-table';
 import { Button } from '@/components/atomic/button';
 import { Edit, Trash2 } from 'lucide-react';
@@ -104,7 +105,7 @@ function RouteComponent() {
     try {
       await deleteUserMutation.mutateAsync(user.id)
     } catch (error) {
-      console.error("Error deleting user: " + user.name)
+      toastApiError(`Failed to delete ${user.name}`, error)
     }
     
   };
