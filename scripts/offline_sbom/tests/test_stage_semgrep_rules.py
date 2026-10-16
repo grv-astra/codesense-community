@@ -156,6 +156,32 @@ class StageTests(unittest.TestCase):
         sgr.stage(dest, src=src)
         self.assertFalse((dest / ".git").exists())
 
+    def test_stage_drops_a_git_dir_whose_pack_files_are_read_only(self):
+        # Regression: a real clone's .git/objects/pack/*.idx|pack files are read-only. On Windows
+        # rmtree(ignore_errors=True) silently left them behind, and the leftover .git made the
+        # Tauri build fail with "Access is denied" while scanning resources.
+        src = self._src()
+        pack = src / ".git" / "objects" / "pack"
+        pack.mkdir(parents=True)
+        for name in ("pack-abc.idx", "pack-abc.pack"):
+            f = pack / name
+            f.write_bytes(b"x")
+            os.chmod(f, 0o444)
+        dest = self._tmp("bundle-ro") / "semgrep-rules"
+        self.assertTrue(sgr.stage(dest, src=src))
+        self.assertFalse((dest / ".git").exists())
+        self.assertTrue((dest / sgr.READY_MARKER).exists())
+
+    def test_rmtree_force_removes_read_only_files_and_tolerates_a_missing_path(self):
+        d = self._tmp("ro")
+        d.mkdir()
+        f = d / "locked.txt"
+        f.write_text("x")
+        os.chmod(f, 0o444)
+        sgr.rmtree_force(d)
+        self.assertFalse(d.exists())
+        sgr.rmtree_force(d)                       # already gone: no error
+
     def test_stage_is_idempotent_when_marker_present(self):
         src = self._src()
         dest = self._tmp("bundle3") / "semgrep-rules"

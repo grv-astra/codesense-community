@@ -1,5 +1,22 @@
 # Code Sense — Release Notes
 
+## Unreleased — "Bring your own LLM"
+
+- **Verify findings with your own LLM — in every edition, including Community.** New
+  *Settings → AI verification* page: connect an OpenAI-compatible API (OpenAI, Azure OpenAI,
+  Ollama, LM Studio, vLLM, Gemini / Mistral / Groq via their compatible endpoints) or the native
+  Anthropic API, test the connection, and turn it on after confirming exactly what is sent.
+  Off by default; the API key is encrypted and never shown again; scans never block on the LLM
+  (findings are kept and marked unverified if it fails). A health light on the dashboard shows
+  whether it is working. See `docs/EDITIONS.md` §10.
+- **Mitigation advice from your own LLM.** A new switch, *Also write mitigation advice* (on by
+  default, with its own confirmation because it sends the rule name and analyzer message too),
+  has the LLM write each kept finding's title, description, impact and Mitigation Steps instead
+  of only the rule's reference links. The text is labelled as AI-written; failures leave the
+  standard text and never reduce verification coverage. It roughly doubles model calls.
+- New feature flag `byo_llm` (on in all editions). `llm_analysis` now means the bundled local
+  model with the premium verifier and report enrichment (Pro / Enterprise), unchanged.
+
 ## v1.0 — "LLM quality fixed + measured" (2026-07-01)
 
 The close of the 12-week roadmap (design spec `docs/superpowers/specs/2026-05-31-…-design.md`).

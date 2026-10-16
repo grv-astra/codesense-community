@@ -2,6 +2,7 @@ import Header from '@/components/molecule/header'
 import Sidebar from '@/components/molecule/sidebar'
 import LicenseBanner from '@/components/molecule/license-banner'
 import { EditionBadge } from '@/components/molecule/edition-badge'
+import { LlmStatusIndicator } from '@/components/molecule/llm-status-indicator'
 import { createFileRoute, Outlet } from '@tanstack/react-router'
 
 export const Route = createFileRoute('/_authenticated')({
@@ -25,7 +26,10 @@ function RouteComponent() {
           of the grid stretching to fit the content. */}
       <div className="min-h-0 overflow-y-auto p-4">
         <div className="mb-2 flex flex-col items-start gap-2">
-          <EditionBadge />
+          <div className="flex flex-wrap items-center gap-2">
+            <EditionBadge />
+            <LlmStatusIndicator />
+          </div>
           <LicenseBanner />
         </div>
         <Outlet />

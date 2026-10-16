@@ -333,6 +333,31 @@ def parse_semgrep_json(raw: str) -> list[SemgrepFinding]:
     return findings
 
 
+# Windows' MAX_PATH is 260. Only paths at or past this length get the \\?\ extended-length prefix
+# (comfortably below the limit, because the extraction path is extended further by the code base's
+# own nesting).
+_LONG_PATH_THRESHOLD = 200
+
+
+def _long_path_safe(path: str) -> str:
+    """The path to hand to the engine as a scan target on Windows.
+
+    Ordinary paths are passed as plain absolute paths. The \\\\?\\ extended-length prefix is added only
+    when the path is long enough to need it (see the WinError 206 note in run_semgrep), because the
+    prefix is NOT harmless: OpenGrep then cannot make the target relative to its root, matches its
+    default ignore patterns (build/, dist/, vendor/, test/, ...) against the WHOLE absolute path
+    instead, and silently scans nothing if any folder in the path is named like one of them -- e.g. an
+    app-data folder under a user or build directory called "build". It also made every finding's path
+    absolute with the prefix, which broke path-relative features (incremental scans).
+    """
+    if os.name != "nt" or path.startswith("\\\\?\\"):
+        return path
+    absolute = os.path.abspath(path)
+    if len(absolute) < _LONG_PATH_THRESHOLD:
+        return absolute
+    return "\\\\?\\" + absolute
+
+
 def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
     bin_path = get_semgrep_bin()
     rules_dir = get_semgrep_rules_dir()
@@ -364,11 +389,8 @@ def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
     # single argument with WinError 206 ("filename or extension is too long"),
     # which subprocess.run() surfaces as if the semgrep binary itself couldn't
     # be found -- misleading, since the binary is fine; it's this argument.
-    def _long_path_safe(path: str) -> str:
-        if os.name == "nt" and not path.startswith("\\\\?\\"):
-            return "\\\\?\\" + os.path.abspath(path)
-        return path
-
+    # (`_long_path_safe` is module-level below: the prefix is applied ONLY to paths long enough to
+    # need it, see its docstring for why it must not be used on ordinary ones.)
     if isinstance(target, (list, tuple)):
         safe_targets = [_long_path_safe(t) for t in target]
         # An incremental scan can pass hundreds of individual file paths as

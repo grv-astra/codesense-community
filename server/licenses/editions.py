@@ -13,7 +13,8 @@ from __future__ import annotations
 DEFAULT_EDITION = "community"
 
 FEATURE_KEYS = (
-    "llm_analysis",        # LLM verifier + report enrichment
+    "llm_analysis",        # bundled local model: premium LLM verifier + report enrichment
+    "byo_llm",             # connect the user's OWN LLM (API) for verification -- all editions
     "sbom_signing",        # cosign SBOM signing + verification
     "license_compliance",  # grant license-policy findings
     "api_access",          # REST/CI-CD access via API keys
@@ -42,6 +43,7 @@ EDITIONS: dict[str, dict] = {
         "features": {
             **{k: False for k in FEATURE_KEYS},
             "github_scan": True,
+            "byo_llm": True,
         },
         "limits": {
             "projects": 1,

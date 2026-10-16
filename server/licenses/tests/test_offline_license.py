@@ -1,7 +1,9 @@
 import json
+import os
 import plistlib
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock, skipUnless
@@ -121,3 +123,168 @@ class OfflineLicenseTests(SimpleTestCase):
         with Path(self._plist).open("wb") as fh:
             plistlib.dump(rec, fh)
         self.assertEqual(lic.get_state()["state"], lic.TAMPERED)
+
+
+class LicenseScopeLocationTests(SimpleTestCase):
+    """LICENSE_SCOPE moves the OS-level second store; unscoped builds keep the legacy one."""
+
+    def _home(self):
+        return mock.patch.object(Path, "home", return_value=Path("/home/u"))
+
+    def test_unscoped_uses_the_shared_legacy_locations(self):
+        with override_settings(LICENSE_SCOPE="", LICENSE_PLIST_PATH=None), self._home():
+            self.assertEqual(lic._registry_path(), r"Software\CodeSense")
+            self.assertEqual(lic._plist_path().name, "com.codesense.desktop.license.plist")
+
+    def test_missing_setting_is_unscoped(self):
+        from django.conf import settings
+        with override_settings(LICENSE_PLIST_PATH=None), self._home():
+            del settings.LICENSE_SCOPE  # as in a settings module that predates the option
+            self.assertEqual(lic._scope(), "")
+            self.assertEqual(lic._registry_path(), r"Software\CodeSense")
+
+    def test_scoped_builds_get_their_own_registry_key_and_plist(self):
+        with override_settings(LICENSE_SCOPE="Community", LICENSE_PLIST_PATH=None), self._home():
+            self.assertEqual(lic._registry_path(), r"Software\CodeSense\Community")
+            plist = lic._plist_path()
+            self.assertEqual(plist.name, "com.codesense.desktop.license.Community.plist")
+            self.assertEqual(plist.parent.name, "Preferences")
+
+    def test_explicit_plist_override_still_wins(self):
+        with override_settings(LICENSE_SCOPE="Community", LICENSE_PLIST_PATH="/x/y.plist"):
+            self.assertEqual(lic._plist_path(), Path("/x/y.plist"))
+
+    def test_scope_is_restricted_to_a_safe_charset_and_length(self):
+        for raw, want in [
+            ("..\\..\\Run", "Run"),            # no climbing out of the key
+            ("a/b\\c d!", "abcd"),
+            ("  Community  ", "Community"),
+            ("A_b-9", "A_b-9"),
+            ("x" * 50, "x" * 32),
+            ("...", ""),                       # nothing usable -> the legacy store
+        ]:
+            with override_settings(LICENSE_SCOPE=raw):
+                self.assertEqual(lic._scope(), want, raw)
+        with override_settings(LICENSE_SCOPE=None):
+            self.assertEqual(lic._scope(), "")
+
+
+class LicenseScopeIndependenceTests(SimpleTestCase):
+    """An old stamp in the shared store must not age a scoped build's licence.
+
+    The bug this guards: HKCU\\Software\\CodeSense\\license is shared by every build for the OS
+    user and the earliest first_seen wins, so a Community install on a machine that once ran
+    an earlier build read "expired" on day one.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        # Hermetic OS stores: an in-memory registry keyed by PATH (so the key actually used is
+        # what is under test) and the macOS plist backend switched on against a temp HOME.
+        self.reg = {}
+        self._patches = [
+            mock.patch.object(lic, "_registry_read",
+                              side_effect=lambda: self.reg.get(lic._registry_path())),
+            mock.patch.object(lic, "_registry_write",
+                              side_effect=lambda rec: self.reg.__setitem__(lic._registry_path(), rec)),
+            mock.patch.object(lic, "sys", mock.Mock(platform="darwin")),
+            mock.patch.object(Path, "home", return_value=Path(self.root) / "home"),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _run(self, scope, name):
+        """get_state() as a build with this LICENSE_SCOPE and its own (fresh) data dir."""
+        data = Path(self.root) / name
+        with override_settings(DATA_DIR=str(data), LICENSE_DURATION_DAYS=90,
+                               LICENSE_PLIST_PATH=None, LICENSE_SCOPE=scope):
+            return lic.get_state()
+
+    def test_old_shared_stamp_does_not_expire_a_scoped_build(self):
+        # An earlier unscoped build (client delivery / Pro / dev) first ran 100 days ago.
+        old = lic._make_record(_ago(100), _ago(100))
+        with override_settings(LICENSE_SCOPE=""):
+            lic._registry_write(old)
+            plist = lic._plist_path()
+        plist.parent.mkdir(parents=True)
+        with plist.open("wb") as fh:
+            plistlib.dump(old, fh)
+
+        self.assertEqual(self._run("", "build_a")["state"], lic.EXPIRED)  # control: it IS expired
+        scoped = self._run("Community", "build_b")
+        self.assertEqual(scoped["state"], lic.ACTIVE)
+        self.assertGreaterEqual(scoped["days_remaining"], 89)
+
+    def test_each_scope_keeps_its_own_clock_and_never_touches_the_shared_store(self):
+        old = lic._make_record(_ago(100), _ago(100))
+        with override_settings(LICENSE_SCOPE=""):
+            lic._registry_write(old)
+
+        self._run("Community", "build_b")
+        self.assertEqual(set(self.reg), {r"Software\CodeSense", r"Software\CodeSense\Community"})
+        self.assertEqual(self.reg[r"Software\CodeSense"], old)  # shared stamp left alone
+        self.assertEqual(
+            sorted(p.name for p in (Path(self.root) / "home" / "Library" / "Preferences").iterdir()),
+            ["com.codesense.desktop.license.Community.plist"],  # no shared plist created
+        )
+        # A different scope is a different clock again, and the shared one is still expired.
+        self.assertEqual(self._run("Other", "build_c")["state"], lic.ACTIVE)
+        self.assertEqual(self._run("", "build_a")["state"], lic.EXPIRED)
+
+    def test_scoped_clock_still_survives_deleting_the_data_dir_copy(self):
+        first = self._run("Community", "build_b")
+        (Path(self.root) / "build_b" / "license.json").unlink()
+        again = self._run("Community", "build_b")
+        self.assertEqual(again["first_seen"], first["first_seen"])  # healed from the scoped store
+        self.assertTrue((Path(self.root) / "build_b" / "license.json").exists())
+
+
+@skipUnless(os.name == "nt", "Windows registry store")
+class LicenseScopeRealRegistryTests(SimpleTestCase):
+    """The same guarantee against the real Windows registry, under a throwaway key."""
+
+    def setUp(self):
+        import winreg
+        self._winreg = winreg
+        self.top = rf"Software\CodeSenseTest_{uuid.uuid4().hex}"
+        p = mock.patch.object(lic, "_REG_PATH", self.top)  # never the real HKCU\Software\CodeSense
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self._drop_keys)
+        self.tmp = tempfile.mkdtemp()
+
+    def _drop_keys(self):
+        w = self._winreg
+        for path in (rf"{self.top}\Community", self.top):
+            try:
+                w.DeleteKey(w.HKEY_CURRENT_USER, path)
+            except OSError:
+                pass
+
+    def _raw(self, path):
+        w = self._winreg
+        with w.OpenKey(w.HKEY_CURRENT_USER, path) as key:
+            return json.loads(w.QueryValueEx(key, "license")[0])
+
+    def _run(self, scope, name):
+        with override_settings(DATA_DIR=str(Path(self.tmp) / name), LICENSE_DURATION_DAYS=90,
+                               LICENSE_PLIST_PATH=str(Path(self.tmp) / f"{name}.plist"),
+                               LICENSE_SCOPE=scope):
+            return lic.get_state()
+
+    def test_scoped_build_ignores_an_old_stamp_in_the_shared_key(self):
+        old = lic._make_record(_ago(100), _ago(100))
+        with override_settings(LICENSE_SCOPE=""):
+            lic._registry_write(old)
+
+        self.assertEqual(self._run("", "build_a")["state"], lic.EXPIRED)
+        scoped = self._run("Community", "build_b")
+        self.assertEqual(scoped["state"], lic.ACTIVE)
+        self.assertGreaterEqual(scoped["days_remaining"], 89)
+
+        # Each clock lives in its own key: the shared one still dates from 100 days ago ...
+        self.assertEqual(self._raw(self.top)["first_seen"], old["first_seen"])
+        # ... and the scoped one from now.
+        started = datetime.fromisoformat(self._raw(rf"{self.top}\Community")["first_seen"])
+        self.assertLess(datetime.now(timezone.utc) - started, timedelta(minutes=5))

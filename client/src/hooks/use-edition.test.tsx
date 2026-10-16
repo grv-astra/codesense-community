@@ -12,7 +12,7 @@ vi.mock('@/services/edition.service', () => ({
 const base: EditionStatus = {
   edition: 'community', label: 'Community', source: 'default', customer: '',
   issued_at: '', expires_at: null, model_tier: 'low', warnings: [],
-  features: { llm_analysis: false, sbom_signing: false, license_compliance: false,
+  features: { llm_analysis: false, byo_llm: true, sbom_signing: false, license_compliance: false,
     api_access: false, incremental_scan: false, github_scan: true, sso: false, audit_log: false },
   limits: { projects: 1, code_scans_per_window: 25, sbom_scans_per_window: 25,
     window_days: 30, max_codebase_mb: 250, seats: 3 },

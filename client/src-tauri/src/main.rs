@@ -45,7 +45,16 @@ const LLAMA_PORT: &str = "8001";
 // machine. Note: this value is NOT part of the HMAC-signed license record
 // (only first_seen/last_seen are) -- it only stops casual clock/env editing,
 // per offline_license.py's documented threat model, not a determined user.
-const LICENSE_DURATION_DAYS: &str = "30";
+// This is the DEFAULT (the client delivery); a build overrides it with the
+// build-time env CS_LICENSE_DAYS (see `baked` / `license_duration_days` below).
+const DEFAULT_LICENSE_DURATION_DAYS: &str = "30";
+// Where the licence clock's OS-level copy lives (offline_license.py::_scope): the registry
+// value / plist is outside the data dir, so it survives uninstalls and is shared by every
+// build run by the same OS user. Empty (the DEFAULT) keeps that shared legacy location, so
+// client deliveries and Pro are unchanged. The Community installer sets build-time env
+// CS_LICENSE_SCOPE=Community so a public download never inherits the date an earlier
+// build left behind (earliest first_seen wins), nor leaves one for the next.
+const DEFAULT_LICENSE_SCOPE: &str = "";
 // Cosign encrypts the SBOM-signing private key with this passphrase at
 // generation time and needs the identical value again to decrypt it for every
 // later sign-blob call, so it must be a fixed baked-in constant, not left
@@ -77,15 +86,22 @@ const GRYPE_DB_SCHEMA_VERSION: &str = "6";
 // further scan attempt until they contact us to upgrade. Same per-delivery
 // pattern as LICENSE_DURATION_DAYS above -- edit these two constants for a
 // different trial size, or set TRIAL_MODE to "false" for an unlimited build.
-const TRIAL_MODE: &str = "true";
-const TRIAL_SCAN_LIMIT: &str = "2";
+// These are the DEFAULTS (the client delivery); a build overrides them with the
+// build-time env CS_TRIAL_MODE / CS_TRIAL_SCAN_LIMIT (the Community installer
+// turns the trial off and relies on the edition's own limits instead).
+const DEFAULT_TRIAL_MODE: &str = "true";
+const DEFAULT_TRIAL_SCAN_LIMIT: &str = "2";
 // One-time activation gate (licenses/services/activation.py). A bcrypt hash
 // of the activation password -- the plaintext is never baked in and never
 // given to the client; only whoever deploys this build types it once, on
 // the client's own machine, during setup. Until that happens every API
 // route is blocked. Leave empty ("") to ship a build with no activation gate
 // at all (e.g. for internal/ISec review builds).
-const ACTIVATION_PASSWORD_HASH: &str = "$2b$12$eMkfluHrQQnkUJt7y2DBOeokxmBovGdFIjVZ2B20mJVUeLuncfnPm";
+// This is the DEFAULT (the client delivery); a build overrides it with the
+// build-time env CS_ACTIVATION_HASH ("none" = no activation gate, which is how
+// the Community installer ships so a public download is not locked behind a
+// password nobody has).
+const DEFAULT_ACTIVATION_PASSWORD_HASH: &str = "$2b$12$eMkfluHrQQnkUJt7y2DBOeokxmBovGdFIjVZ2B20mJVUeLuncfnPm";
 // Edition wiring (docs/EDITIONS.md, licenses/services/entitlements.py). Same
 // build-injected pattern as the constants above: scripts/build_windows.ps1
 // (-Edition / -EntitlementsPublicKeyPath) and scripts/build_macos.sh export
@@ -97,6 +113,46 @@ const ACTIVATION_PASSWORD_HASH: &str = "$2b$12$eMkfluHrQQnkUJt7y2DBOeokxmBovGdFI
 const BUILD_EDITION: Option<&str> = option_env!("CODESENSE_EDITION");
 const BUILD_ENTITLEMENTS_PUBLIC_KEY: Option<&str> = option_env!("ENTITLEMENTS_PUBLIC_KEY");
 const BUILD_MODEL_TIER: Option<&str> = option_env!("MODEL_TIER");
+
+/// Resolves a per-delivery setting from its build-time override. Pure so it is unit-tested.
+/// * unset            -> `default` (so existing client-delivery builds are unchanged);
+/// * "none" (any case) -> "" (the only way to express "empty": PowerShell drops an env var
+///   set to an empty string, see scripts/run_dev.ps1);
+/// * anything else    -> that value, trimmed.
+fn baked(build_env: Option<&'static str>, default: &'static str) -> &'static str {
+    match build_env {
+        None => default,
+        Some(v) if v.trim().eq_ignore_ascii_case("none") => "",
+        Some(v) => v.trim(),
+    }
+}
+
+fn license_duration_days() -> &'static str {
+    baked(option_env!("CS_LICENSE_DAYS"), DEFAULT_LICENSE_DURATION_DAYS)
+}
+fn license_scope() -> &'static str {
+    baked(option_env!("CS_LICENSE_SCOPE"), DEFAULT_LICENSE_SCOPE)
+}
+fn trial_mode() -> &'static str {
+    baked(option_env!("CS_TRIAL_MODE"), DEFAULT_TRIAL_MODE)
+}
+fn trial_scan_limit() -> &'static str {
+    baked(option_env!("CS_TRIAL_SCAN_LIMIT"), DEFAULT_TRIAL_SCAN_LIMIT)
+}
+fn activation_password_hash() -> &'static str {
+    baked(option_env!("CS_ACTIVATION_HASH"), DEFAULT_ACTIVATION_PASSWORD_HASH)
+}
+
+/// Whether this build bundles the local AI model + llama-server (Pro / Enterprise and the
+/// client delivery). The Community installer sets CS_NO_MODEL=1: no model is unpacked on
+/// first launch, no llama-server is started, and the "AI engine" tray item is absent. The
+/// user's own LLM (Settings > AI verification) is the Community AI path. Pure so it is tested.
+fn bundles_model_for(no_model_flag: Option<&str>) -> bool {
+    !matches!(no_model_flag.map(str::trim), Some("1"))
+}
+fn bundles_model() -> bool {
+    bundles_model_for(option_env!("CS_NO_MODEL"))
+}
 
 /// Env vars that tell the backend which edition it is. Pure so it is unit-tested.
 ///
@@ -300,14 +356,6 @@ fn spawn_backend(app: &tauri::AppHandle, grype_db_dir: &std::path::Path) -> Opti
         .sidecar("codesense-server")
         .ok()?
         .env("CODESENSE_DATA_DIR", data_dir.to_string_lossy().to_string())
-        .env("VLLM_BASE_URL", format!("http://127.0.0.1:{LLAMA_PORT}/v1"))
-        .env("VLLM_MODEL", "astra-code-reviewer")
-        .env("VLLM_API_KEY", "EMPTY")
-        // Ship the instruction-tuned (Apache-2.0 Qwen2.5-Coder-Instruct) path, not
-        // the legacy FIM one: the bundled GGUF is the instruct model and the
-        // verifier/enricher emit/parse JSON only under instruct mode. Without this
-        // the backend defaults to LLM_MODEL_MODE=fim (see llm.py::model_mode).
-        .env("LLM_MODEL_MODE", "instruct")
         .env("SCANNER_TOOLS_DIR", tools_dir.to_string_lossy().to_string())
         .env("GRYPE_DB_CACHE_DIR", grype_db_dir.to_string_lossy().to_string())
         // Windows Semgrep/OpenGrep is `semgrep.exe`; the backend's SEMGREP_BIN
@@ -331,11 +379,34 @@ fn spawn_backend(app: &tauri::AppHandle, grype_db_dir: &std::path::Path) -> Opti
         )
         .env("COSIGN_KEY_DIR", keys_dir.to_string_lossy().to_string())
         .env("COSIGN_PASSWORD", COSIGN_PASSWORD)
-        .env("LICENSE_DURATION_DAYS", LICENSE_DURATION_DAYS)
-        .env("TRIAL_MODE", TRIAL_MODE)
-        .env("TRIAL_SCAN_LIMIT", TRIAL_SCAN_LIMIT)
-        .env("ACTIVATION_PASSWORD_HASH", ACTIVATION_PASSWORD_HASH)
+        .env("LICENSE_DURATION_DAYS", license_duration_days())
+        // Always set (empty = legacy shared store) so an ambient LICENSE_SCOPE in the user's
+        // shell cannot move this build's clock.
+        .env("LICENSE_SCOPE", license_scope())
+        .env("TRIAL_MODE", trial_mode())
+        .env("TRIAL_SCAN_LIMIT", trial_scan_limit())
         .args(["127.0.0.1", BACKEND_PORT]);
+
+    // No activation gate when the build says so (Community): leave the variable unset rather
+    // than set to "" so there is no doubt the backend sees "no gate".
+    let activation_hash = activation_password_hash();
+    if !activation_hash.is_empty() {
+        cmd = cmd.env("ACTIVATION_PASSWORD_HASH", activation_hash);
+    }
+
+    // Local AI engine settings only matter when the model is bundled. Without it (Community)
+    // the backend must not be pointed at a llama-server that is never started.
+    if bundles_model() {
+        cmd = cmd
+            .env("VLLM_BASE_URL", format!("http://127.0.0.1:{LLAMA_PORT}/v1"))
+            .env("VLLM_MODEL", "astra-code-reviewer")
+            .env("VLLM_API_KEY", "EMPTY")
+            // Ship the instruction-tuned (Apache-2.0 Qwen2.5-Coder-Instruct) path, not
+            // the legacy FIM one: the bundled GGUF is the instruct model and the
+            // verifier/enricher emit/parse JSON only under instruct mode. Without this
+            // the backend defaults to LLM_MODEL_MODE=fim (see llm.py::model_mode).
+            .env("LLM_MODEL_MODE", "instruct");
+    }
 
     for (key, value) in edition_env(BUILD_EDITION, BUILD_ENTITLEMENTS_PUBLIC_KEY, BUILD_MODEL_TIER) {
         cmd = cmd.env(key, value);
@@ -523,12 +594,18 @@ fn ensure_assets_then_spawn(app: tauri::AppHandle) {
         // must clear the flag again — the guard does that on drop.
         let _guard = SetupInProgressGuard { app: app.clone() };
 
-        let model_resource = match app.path().resolve("resources/model", BaseDirectory::Resource) {
-            Ok(p) => p,
-            Err(_) => {
-                fail_setup(&app, "model", "failed to resolve resources/model directory".to_string());
-                return;
+        // A build with no bundled model (Community, CS_NO_MODEL=1) skips every model step:
+        // there is nothing to reassemble and no llama-server to start.
+        let model_resource: Option<PathBuf> = if bundles_model() {
+            match app.path().resolve("resources/model", BaseDirectory::Resource) {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    fail_setup(&app, "model", "failed to resolve resources/model directory".to_string());
+                    return;
+                }
             }
+        } else {
+            None
         };
         let grype_resource = match app.path().resolve("resources/grype-db", BaseDirectory::Resource) {
             Ok(p) => p,
@@ -565,23 +642,26 @@ fn ensure_assets_then_spawn(app: tauri::AppHandle) {
         // llm_health() check already fails open for verification, and new
         // code scans are blocked by the trial cap regardless).
         let model_exhausted_marker = model_target_dir.join("TRIAL_EXHAUSTED");
-        let model_path = if model_exhausted_marker.exists() {
-            model_target_dir.join(MODEL_ASSET.file_name)
-        } else {
-            match reassemble_with_retry(
-                &app, "model", &model_resource, &model_target_dir, &MODEL_ASSET,
-            ) {
-                Ok(path) => path,
-                Err(e) => {
-                    let reason = if matches!(e, ReassemblyError::ManifestMissing | ReassemblyError::ManifestCorrupt(_)) {
-                        format!("reinstall required: {e}")
-                    } else {
-                        e.to_string()
-                    };
-                    fail_setup(&app, "model", reason);
-                    return;
+        let model_path: Option<PathBuf> = match &model_resource {
+            None => None,
+            Some(model_resource) => Some(if model_exhausted_marker.exists() {
+                model_target_dir.join(MODEL_ASSET.file_name)
+            } else {
+                match reassemble_with_retry(
+                    &app, "model", model_resource, &model_target_dir, &MODEL_ASSET,
+                ) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        let reason = if matches!(e, ReassemblyError::ManifestMissing | ReassemblyError::ManifestCorrupt(_)) {
+                            format!("reinstall required: {e}")
+                        } else {
+                            e.to_string()
+                        };
+                        fail_setup(&app, "model", reason);
+                        return;
+                    }
                 }
-            }
+            }),
         };
 
         if let Err(e) = reassemble_with_retry(
@@ -598,7 +678,7 @@ fn ensure_assets_then_spawn(app: tauri::AppHandle) {
 
         {
             let state = app.state::<AppState>();
-            *state.model_path.lock().unwrap() = Some(model_path.clone());
+            *state.model_path.lock().unwrap() = model_path.clone();
             *state.grype_db_dir.lock().unwrap() = Some(grype_target_dir.clone());
         }
 
@@ -614,7 +694,7 @@ fn ensure_assets_then_spawn(app: tauri::AppHandle) {
 
         let state = app.state::<AppState>();
         *state.backend.lock().unwrap() = spawn_backend(&app, &grype_target_dir);
-        *state.llama.lock().unwrap() = spawn_llama(&app, &model_path);
+        *state.llama.lock().unwrap() = model_path.as_ref().and_then(|p| spawn_llama(&app, p));
     });
 }
 
@@ -708,10 +788,15 @@ fn main() {
             ensure_assets_then_spawn(handle);
 
             let open = MenuItem::with_id(app, "open", "Open Code Sense", true, None::<&str>)?;
-            let pause = MenuItem::with_id(app, "pause_ai", "Pause / resume AI engine", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&open, &pause, &sep, &quit])?;
+            // The "AI engine" item only exists when a local model is bundled (not in Community).
+            let menu = if bundles_model() {
+                let pause = MenuItem::with_id(app, "pause_ai", "Pause / resume AI engine", true, None::<&str>)?;
+                Menu::with_items(app, &[&open, &pause, &sep, &quit])?
+            } else {
+                Menu::with_items(app, &[&open, &sep, &quit])?
+            };
 
             TrayIconBuilder::with_id("main")
                 .tooltip("Code Sense")
@@ -768,7 +853,53 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::edition_env;
+    use super::{
+        baked, bundles_model_for, edition_env, DEFAULT_ACTIVATION_PASSWORD_HASH,
+        DEFAULT_LICENSE_DURATION_DAYS, DEFAULT_LICENSE_SCOPE, DEFAULT_TRIAL_MODE,
+        DEFAULT_TRIAL_SCAN_LIMIT,
+    };
+
+    #[test]
+    fn unset_overrides_keep_the_client_delivery_defaults() {
+        // A build that sets none of the CS_* variables must behave exactly as before.
+        assert_eq!(baked(None, DEFAULT_LICENSE_DURATION_DAYS), "30");
+        assert_eq!(baked(None, DEFAULT_TRIAL_MODE), "true");
+        assert_eq!(baked(None, DEFAULT_TRIAL_SCAN_LIMIT), "2");
+        assert_eq!(baked(None, DEFAULT_ACTIVATION_PASSWORD_HASH), DEFAULT_ACTIVATION_PASSWORD_HASH);
+        assert!(DEFAULT_ACTIVATION_PASSWORD_HASH.starts_with("$2b$"));
+    }
+
+    #[test]
+    fn licence_scope_is_the_shared_legacy_store_unless_a_build_sets_one() {
+        assert_eq!(baked(None, DEFAULT_LICENSE_SCOPE), "");
+        assert_eq!(baked(Some("Community"), DEFAULT_LICENSE_SCOPE), "Community");
+        assert_eq!(baked(Some(" Community "), DEFAULT_LICENSE_SCOPE), "Community");
+        assert_eq!(baked(Some("none"), DEFAULT_LICENSE_SCOPE), "");
+    }
+
+    #[test]
+    fn a_value_overrides_and_is_trimmed() {
+        assert_eq!(baked(Some("90"), "30"), "90");
+        assert_eq!(baked(Some(" 90 "), "30"), "90");
+        assert_eq!(baked(Some("false"), "true"), "false");
+    }
+
+    #[test]
+    fn none_means_empty_in_any_case() {
+        for v in ["none", "NONE", " None "] {
+            assert_eq!(baked(Some(v), "$2b$12$somehash"), "", "{v:?}");
+        }
+    }
+
+    #[test]
+    fn the_model_is_bundled_unless_explicitly_disabled() {
+        assert!(bundles_model_for(None));
+        assert!(bundles_model_for(Some("0")));
+        assert!(bundles_model_for(Some("")));
+        assert!(bundles_model_for(Some("yes")));
+        assert!(!bundles_model_for(Some("1")));
+        assert!(!bundles_model_for(Some(" 1 ")));
+    }
 
     fn get<'a>(vars: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
         vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str())

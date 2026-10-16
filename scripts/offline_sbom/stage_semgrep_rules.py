@@ -20,8 +20,10 @@ is not enough.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -37,6 +39,27 @@ READY_MARKER = ".codesense-rules-ready"
 # start of the line, so an indented ``  rules:`` (nested under another key) and
 # look-alikes such as ``rules_extra:`` do not match.
 _TOP_LEVEL_RULES = re.compile(r"rules\s*:")
+
+
+def _clear_readonly_and_retry(func, path, _exc_info):
+    """``shutil.rmtree`` error handler: git marks its pack/idx files read-only, and on
+    Windows deleting a read-only file fails. Clear the attribute and retry once."""
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    func(path)
+
+
+def rmtree_force(path) -> None:
+    """Remove a tree even if it holds read-only files (a cloned ``.git``). Errors beyond that
+    are NOT swallowed: a leftover ``.git`` in the bundled rules makes the Tauri build fail
+    ("Access is denied" while scanning resources), which is worse than failing loudly here."""
+    path = Path(path)
+    if not path.exists():
+        return
+    # Python 3.12 renamed the callback argument; support both.
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_clear_readonly_and_retry)
+    else:
+        shutil.rmtree(path, onerror=_clear_readonly_and_retry)
 
 
 def has_top_level_rules_key(path) -> bool:
@@ -105,17 +128,21 @@ def stage(dest, *, repo: str = DEFAULT_REPO, ref: str | None = None,
             except OSError:  # git not installed / not on PATH
                 return False
 
-        shutil.rmtree(built / ".git", ignore_errors=True)
+        rmtree_force(built / ".git")
         prune_to_valid_rules(built)
         (built / READY_MARKER).write_text("staged by stage_semgrep_rules.py\n")
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
-            shutil.rmtree(dest)
+            rmtree_force(dest)
         shutil.move(str(built), str(dest))
         return True
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        # best effort: a temp dir we could not fully clean must not fail an otherwise good stage
+        try:
+            rmtree_force(work)
+        except OSError:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def _count_rule_files(root: Path) -> int:

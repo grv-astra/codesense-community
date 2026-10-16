@@ -33,6 +33,21 @@ describe('UpdatedFinding', () => {
     );
   });
 
+  test('labels model-written text as AI-written, and does not label rule-derived text', () => {
+    const { unmount } = render(<UpdatedFinding finding={{ ...base, report_source: 'ai' } as any} />);
+    expect(screen.getByTestId('ai-written-note')).toHaveTextContent(/written by an AI model/);
+    expect(screen.getByTestId('ai-written-note')).toHaveTextContent(/Review them before applying/);
+    unmount();
+
+    render(<UpdatedFinding finding={{ ...base, report_source: '' } as any} />);
+    expect(screen.queryByTestId('ai-written-note')).not.toBeInTheDocument();
+  });
+
+  test('older findings without report_source show no AI label', () => {
+    render(<UpdatedFinding finding={base as any} />);
+    expect(screen.queryByTestId('ai-written-note')).not.toBeInTheDocument();
+  });
+
   test('renders rule_id as just its last dotted segment, not the full namespaced path', () => {
     render(
       <UpdatedFinding

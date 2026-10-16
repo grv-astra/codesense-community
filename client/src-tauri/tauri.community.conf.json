@@ -1,0 +1,30 @@
+{
+  "productName": "Code Sense Community",
+  "version": "1.0.0",
+  "identifier": "com.codesense.community",
+  "app": {
+    "windows": [
+      {
+        "title": "Code Sense Community",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 1024,
+        "minHeight": 700,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "externalBin": ["binaries/codesense-server"],
+    "resources": {
+      "resources/model/": null,
+      "resources/webview2/": null
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "path": null
+      }
+    }
+  }
+}

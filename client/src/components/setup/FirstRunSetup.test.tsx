@@ -1,6 +1,42 @@
 import { render, screen } from '@testing-library/react';
-import { describe, test, expect, vi } from 'vitest';
+import { afterEach, describe, test, expect, vi } from 'vitest';
 import { FirstRunSetup } from './FirstRunSetup';
+
+describe('FirstRunSetup in a build without a bundled model (Community installer)', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  test('the vulnerability database alone drives the bar to 100%, and the text does not mention an AI model', () => {
+    vi.stubEnv('VITE_BUNDLES_MODEL', '0');
+    render(
+      <FirstRunSetup
+        state={{ status: 'pending', progress: { 'grype-db': { bytes: 100, total: 100 } }, retry: vi.fn() }}
+      />,
+    );
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100');
+    expect(screen.getByText(/Preparing the vulnerability database/)).toBeInTheDocument();
+    expect(screen.queryByText(/AI model/)).not.toBeInTheDocument();
+  });
+
+  test('halfway through the database is 50%, not 25%', () => {
+    vi.stubEnv('VITE_BUNDLES_MODEL', '0');
+    render(
+      <FirstRunSetup
+        state={{ status: 'pending', progress: { 'grype-db': { bytes: 50, total: 100 } }, retry: vi.fn() }}
+      />,
+    );
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50');
+  });
+
+  test('the default (model bundled) build is unchanged: database alone is only half the bar', () => {
+    render(
+      <FirstRunSetup
+        state={{ status: 'pending', progress: { 'grype-db': { bytes: 100, total: 100 } }, retry: vi.fn() }}
+      />,
+    );
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50');
+    expect(screen.getByText(/Preparing the AI model and vulnerability database/)).toBeInTheDocument();
+  });
+});
 
 describe('FirstRunSetup', () => {
   test('shows progress percentage while pending', () => {

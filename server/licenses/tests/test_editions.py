@@ -26,6 +26,13 @@ class EditionsCatalogTests(SimpleTestCase):
         self.assertFalse(f["incremental_scan"])
         self.assertTrue(f["github_scan"])
 
+    def test_byo_llm_is_on_in_every_edition(self):
+        # Community can connect the user's own LLM; the bundled model
+        # (llm_analysis) stays Pro/Enterprise-only.
+        for name, spec in EDITIONS.items():
+            self.assertTrue(spec["features"]["byo_llm"], name)
+        self.assertFalse(EDITIONS["community"]["features"]["llm_analysis"])
+
     def test_enterprise_is_unlimited(self):
         for k, v in EDITIONS["enterprise"]["limits"].items():
             if k == "window_days":

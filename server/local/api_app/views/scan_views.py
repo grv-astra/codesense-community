@@ -622,11 +622,19 @@ class ScanResumeView(APIView):
 class ModelHealthView(APIView):
     @require_permission("view_scans")
     def get(self, request):
-        # Lazy import: llm.py is the llm_analysis-gated subsystem, absent from a
-        # Community edition export (docs/EDITIONS-REPO-SPLIT.md). This view is
-        # not itself edition-gated (pre-existing), so on Community it now 500s
-        # here instead of returning a (still-useless) health check against a
-        # model host Community never spawns -- flagged as a known follow-up.
+        # This reports on the BUNDLED model (llm.py), the llm_analysis-gated
+        # subsystem that is absent from a Community export
+        # (docs/EDITIONS-REPO-SPLIT.md). Gate before the lazy import so Community
+        # gets a clean 403 instead of an ImportError 500. A user's own LLM
+        # (byo_llm) is reported by /api/llm/status/ instead.
+        from licenses.services import entitlements
+        if not entitlements.get().feature("llm_analysis"):
+            return Response(
+                {"error": "The bundled AI model requires CodeSense Pro or Enterprise. "
+                          "Use GET /api/llm/status/ for your own LLM connection."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        from scanner.byo_llm.redact import redact
         from scanner.rag.llm import get_llm
         client = get_llm()
         try:
@@ -638,7 +646,7 @@ class ModelHealthView(APIView):
                     "provider": "vllm",
                     "configured_model": client.model,
                     "base_url": client.base_url,
-                    "error": str(exc),
+                    "error": redact(exc, client.api_key),
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
@@ -654,7 +662,7 @@ class ModelHealthView(APIView):
                 "configured_model": health["configured_model"],
                 "available_models": health["available_models"],
                 "inference_ok": inference_ok,
-                "inference_detail": inference_detail,
+                "inference_detail": redact(inference_detail, client.api_key),
             },
             status=status.HTTP_200_OK if inference_ok else status.HTTP_503_SERVICE_UNAVAILABLE,
         )

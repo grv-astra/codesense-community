@@ -9,7 +9,8 @@ import type {
 } from '@/types/edition';
 
 const FEATURE_LABELS: Record<keyof EditionFeatures, string> = {
-  llm_analysis: 'AI verification & enrichment',
+  llm_analysis: 'Bundled local AI model (verification & enrichment)',
+  byo_llm: 'Connect your own LLM (verification)',
   sbom_signing: 'SBOM signing (cosign)',
   license_compliance: 'License compliance (grant)',
   api_access: 'REST API / CI-CD keys',

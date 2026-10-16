@@ -93,6 +93,11 @@ class Finding(UUIDModel):
     # (first detection) survives even after many re-scans copy it forward.
     first_seen_scan_id = models.CharField(max_length=32, blank=True, default="", db_index=True)
 
+    # "ai" when title/description/security_risk/mitigation were written by an LLM
+    # (the bundled model or the user's own); "" when they are the deterministic,
+    # rule-derived text. Lets the UI label model-authored advice as such.
+    report_source = models.CharField(max_length=16, blank=True, default="")
+
     class Meta:
         app_label = "api_app"
         db_table = "findings"
@@ -195,3 +200,35 @@ class ScanEvent(UUIDModel):
     class Meta:
         app_label = "api_app"
         db_table = "scan_events"
+
+
+class LLMConnection(UUIDModel):
+    """The install's single bring-your-own-LLM connection (singleton row; use
+    scanner.byo_llm.store.load()). The API key is stored ONLY encrypted
+    (api_key_enc) and is write-only through the API. Consent is bound to the host
+    it was given for (consent_host): changing the host clears it."""
+    enabled = models.BooleanField(default=False)
+    provider = models.CharField(max_length=32, default="openai_compatible")
+    base_url = models.CharField(max_length=500, blank=True, default="")
+    model = models.CharField(max_length=200, blank=True, default="")
+    api_version = models.CharField(max_length=32, blank=True, default="")   # Azure OpenAI only
+    api_key_enc = models.TextField(blank=True, default="")
+    timeout_s = models.IntegerField(default=60)
+    max_concurrency = models.IntegerField(default=2)
+    consent_at = models.DateTimeField(null=True, blank=True)
+    consent_by = models.CharField(max_length=32, blank=True, default="")
+    consent_host = models.CharField(max_length=255, blank=True, default="")
+    # Also have the LLM write the finding's mitigation advice (a second call per
+    # finding that sends the rule name + analyzer message too). Active only when
+    # consent_reports is set: consent given BEFORE this existed covers verification only.
+    enrich_reports = models.BooleanField(default=True)
+    consent_reports = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(null=True, blank=True)
+    updated_by = models.CharField(max_length=32, blank=True, default="")
+    last_test_at = models.DateTimeField(null=True, blank=True)
+    last_test_ok = models.BooleanField(null=True, blank=True)
+    last_test_error = models.TextField(blank=True, default="")
+
+    class Meta:
+        app_label = "api_app"
+        db_table = "llm_connection"

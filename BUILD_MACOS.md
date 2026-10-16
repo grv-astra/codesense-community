@@ -19,6 +19,8 @@ Tauri shell are cross-platform. The only macOS-specific code is in **P4**: the o
 license writes its redundant "second copy" to a plist at
 `~/Library/Preferences/com.codesense.desktop.license.plist` (the Windows build uses the
 registry), so deleting the per-user `license.json` alone does not reset the 90-day clock.
+A build with `CS_LICENSE_SCOPE=<name>` exported keeps its clock in
+`com.codesense.desktop.license.<name>.plist` instead of the plist shared by every unscoped build.
 
 ## Quick build (one command)
 

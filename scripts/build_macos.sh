@@ -23,6 +23,11 @@
 # Per-build expiry/secret (baked into the frozen backend's env) — optional:
 #   LICENSE_DURATION_DAYS, LICENSE_SECRET, DJANGO_SECRET_KEY
 #
+# Optional licence-clock scope: export CS_LICENSE_SCOPE=<name> (e.g. Community) to keep this
+# build's clock in ~/Library/Preferences/com.codesense.desktop.license.<name>.plist instead of the
+# plist every unscoped build shares (the Windows installer uses the same variable for its own
+# registry key; main.rs bakes it and the backend reads it as LICENSE_SCOPE). Unset = unchanged.
+#
 # Example:
 #   APPLE_SIGNING_IDENTITY="Developer ID Application: Acme (AB12CD34EF)" \
 #   APPLE_ID=dev@acme.com APPLE_PASSWORD=abcd-efgh-ijkl-mnop APPLE_TEAM_ID=AB12CD34EF \

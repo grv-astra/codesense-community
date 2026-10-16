@@ -12,6 +12,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from scanner.byo_llm.resolve import resolve_byo_backend
 from scanner.rag.database import save_findings_to_db
 from scanner.rag.finding_normalizer import dedupe_findings, normalize
 from scanner.rag.fusion import fuse
@@ -35,10 +36,14 @@ logger = logging.getLogger(__name__)
 def _edition_aware_llm_health() -> tuple[bool, str]:
     """Edition gate in front of llm_health(): Community has no AI analysis, so
     short-circuit to the same (False, reason) shape the fail-open path already
-    handles -- every deterministic finding is still kept, verify/enrich skipped."""
+    handles -- every deterministic finding is still kept, verify/enrich skipped.
+
+    This gates the BUNDLED model only. A user's own LLM (byo_llm, every edition) is
+    resolved separately by scanner.byo_llm.resolve and takes precedence."""
     from licenses.services import entitlements
     if not entitlements.get().feature("llm_analysis"):
-        return False, "AI analysis requires CodeSense Pro or Enterprise"
+        return False, ("No AI model connected: add your own LLM in Settings > AI verification "
+                       "(the bundled model requires CodeSense Pro or Enterprise)")
     from scanner.rag.llm import llm_health
     return llm_health()
 
@@ -58,7 +63,8 @@ def _max_workers() -> int:
         return 4
 
 
-def _process_one(sf, scan_id: str, triggered_by: str, llm_ok: bool = True, scan_root: str = ""):
+def _process_one(sf, scan_id: str, triggered_by: str, llm_ok: bool = True, scan_root: str = "",
+                 backend=None):
     """Run normalize → verify → fuse → (enrich) for ONE finding.
 
     Pure compute + LLM I/O only — NO DB writes or progress updates, so it is safe
@@ -67,6 +73,10 @@ def _process_one(sf, scan_id: str, triggered_by: str, llm_ok: bool = True, scan_
     malformed finding can't sink the batch. Honours the fail-open path: when the
     LLM is unavailable the verifier/reporter calls are skipped and the finding is
     preserved as a low-confidence TP for human review.
+
+    ``backend`` is the user's own LLM (scanner.byo_llm) when one is active: it does
+    the verification and the bundled-model enrichment pass is skipped. ``None``
+    keeps the bundled-model behaviour exactly as before.
     """
     finding_ref = f"{getattr(sf, 'rule_id', '?')}@{getattr(sf, 'file_path', '?')}:{getattr(sf, 'start_line', '?')}"
     try:
@@ -75,7 +85,10 @@ def _process_one(sf, scan_id: str, triggered_by: str, llm_ok: bool = True, scan_
         # llm_ok) so a fail-open finding is still skippable on a later resume.
         finding_dict["fingerprint"] = fingerprint(sf)
         if llm_ok:
-            from scanner.rag.llm_verifier import verify
+            if backend is not None:
+                verify = backend.verify
+            else:
+                from scanner.rag.llm_verifier import verify
             logger.info("LSAST: verifying %s", finding_ref)
             t0 = time.monotonic()
             verdict = verify(
@@ -108,7 +121,7 @@ def _process_one(sf, scan_id: str, triggered_by: str, llm_ok: bool = True, scan_
     # untouched if the model can't produce a usable report, and never touches
     # CWE / severity / location. Skipped for suppressed findings and when the
     # LLM is unavailable.
-    if outcome.action != "suppress" and llm_ok:
+    if outcome.action != "suppress" and llm_ok and backend is None:
         from scanner.rag.report_enricher import apply_report, generate_report
         logger.info("LSAST: enriching %s", finding_ref)
         t0 = time.monotonic()
@@ -124,6 +137,23 @@ def _process_one(sf, scan_id: str, triggered_by: str, llm_ok: bool = True, scan_
         )
         logger.info("LSAST: enriched %s (%.1fs)", finding_ref, time.monotonic() - t0)
         apply_report(outcome.finding, report)
+        if report is not None:
+            outcome.finding["report_source"] = "ai"       # lets the UI label model-written advice
+    elif outcome.action != "suppress" and llm_ok and backend is not None and backend.enrich_reports:
+        # The user's own LLM writes the mitigation advice (a second, separate call; its
+        # failures never affect verification). No file path or line is sent.
+        logger.info("LSAST: writing mitigation for %s", finding_ref)
+        t0 = time.monotonic()
+        backend.write_report(
+            outcome.finding,
+            rule_name=str(outcome.finding.get("title", "")).removeprefix("[verifier:FP] "),
+            cwe=outcome.finding.get("cwe", ""),
+            language=language_for_path(sf.file_path).name,
+            dataflow=dataflow,
+            code_excerpt=sf.code_excerpt,
+            detector_note=sf.message,
+        )
+        logger.info("LSAST: mitigation step done for %s (%.1fs)", finding_ref, time.monotonic() - t0)
     return outcome
 
 
@@ -183,13 +213,23 @@ def lsast_scan_folder(folder_path: str, scan_id: str, triggered_by: str,
     # If not, we keep every deterministic finding but skip the per-finding AI
     # verify/enrich calls — avoids spamming auth errors and records the reason on
     # the scan so the UI can show "AI verification unavailable".
-    llm_ok, llm_detail = _edition_aware_llm_health()
+    # The user's own LLM (byo_llm, every edition) wins when it is enabled, consented
+    # and answers; otherwise fall back to the bundled model (Pro/Enterprise), then to
+    # fail-open. A configured-but-broken connection says so in the detail.
+    backend, byo_problem = resolve_byo_backend()
+    if backend is not None:
+        llm_ok, llm_detail = True, backend.detail
+    else:
+        llm_ok, llm_detail = _edition_aware_llm_health()
+        if byo_problem:
+            llm_detail = f"{byo_problem} {llm_detail}"
     if not llm_ok:
         logger.warning(
             "LSAST: LLM unavailable (%s) — keeping deterministic findings, "
             "skipping AI verify/enrich for scan %s", llm_detail, scan_id,
         )
-    update_progress(scan_id, extra_metrics={"llm": {"available": llm_ok, "detail": llm_detail}})
+    update_progress(scan_id, extra_metrics={
+        "llm": backend.metrics() if backend is not None else {"available": llm_ok, "detail": llm_detail}})
 
     visible: list[dict] = []
     filtered: list[dict] = []
@@ -259,7 +299,7 @@ def lsast_scan_folder(folder_path: str, scan_id: str, triggered_by: str,
             # persisting, bounded by `workers` items. Still far better than
             # the old batch-everything-then-persist behavior.
             for outcome in ex.map(
-                    lambda sf: _process_one(sf, scan_id, triggered_by, llm_ok, folder_path), sem_findings):
+                    lambda sf: _process_one(sf, scan_id, triggered_by, llm_ok, folder_path, backend), sem_findings):
                 _persist(outcome)
                 if cancel_event is not None and cancel_event.is_set():
                     cancelled = True
@@ -273,10 +313,18 @@ def lsast_scan_folder(folder_path: str, scan_id: str, triggered_by: str,
             ex.shutdown(wait=not cancelled, cancel_futures=cancelled)
     else:
         for sf in sem_findings:
-            _persist(_process_one(sf, scan_id, triggered_by, llm_ok, folder_path))
+            _persist(_process_one(sf, scan_id, triggered_by, llm_ok, folder_path, backend))
             if cancel_event is not None and cancel_event.is_set():
                 cancelled = True
                 break
+
+    if backend is not None:
+        # Final per-scan LLM accounting (calls, failures, tokens, verified/unverified).
+        try:
+            backend.finalize()
+            update_progress(scan_id, extra_metrics={"llm": backend.metrics()})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("LSAST: llm metrics update failed: %s", exc)
 
     logger.info(
         "LSAST done%s: %d Semgrep -> %d visible (%d needs_review) + %d filtered",

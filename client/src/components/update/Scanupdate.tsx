@@ -10,6 +10,7 @@ import { ConfirmDialog } from '@/components/atomic/dialog-confirm';
 import { SecurityBadge } from '@/components/atomic/enum-badge';
 import { useCancelScan, useResumeScan } from '@/hooks/use-scans';
 import { ScanProgressPanel } from './ScanProgress/ScanProgressPanel';
+import LlmScanSummary from './llm-scan-summary';
 
 interface ScanUpdateProps {
   scan?: ScanDetails;
@@ -427,6 +428,7 @@ function ScanUpdate({ scan }: ScanUpdateProps) {
                 </div>
  
               </div>
+              {currentScan.metrics.llm && <LlmScanSummary llm={currentScan.metrics.llm} />}
             </div>
  
           </div>

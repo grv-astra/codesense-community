@@ -13,7 +13,9 @@ NOT a determined reverse-engineer:
     embedded.)
   * The stamp is written to TWO places — a file in DATA_DIR and a second OS store
     (Windows registry / macOS plist outside DATA_DIR) — and we take the EARLIEST
-    valid ``first_seen``, so deleting one copy doesn't reset the clock.
+    valid ``first_seen``, so deleting one copy doesn't reset the clock. The OS-level
+    store is shared by every build run by the same OS user unless the build sets
+    ``LICENSE_SCOPE`` (see ``_scope``), which gives that product its own clock.
   * A monotonic ``last_seen`` high-water-mark detects system-clock rollback.
 
 In production the embedded secret should be injected/obfuscated at build time.
@@ -23,6 +25,7 @@ import hmac
 import json
 import os
 import plistlib
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +40,28 @@ TAMPERED = "tampered"
 EXPIRING_WINDOW_DAYS = 7
 _REG_PATH = r"Software\CodeSense"
 _REG_VALUE = "license"
+_PLIST_NAME = "com.codesense.desktop.license"
+
+
+def _scope() -> str:
+    """Per-product scope for the OS-level second store ("" = the shared legacy store).
+
+    The registry value / plist lives OUTSIDE DATA_DIR and so outlives uninstalls and is
+    shared by every build run by the same OS user; the earliest ``first_seen`` wins, so an
+    old build's date silently shortens (or expires) a newer build's licence. A build that
+    sets ``LICENSE_SCOPE`` (Community: ``CS_LICENSE_SCOPE=Community`` -> main.rs ->
+    ``LICENSE_SCOPE``) keeps its own clock in ``HKCU\\Software\\CodeSense\\<scope>`` /
+    ``com.codesense.desktop.license.<scope>.plist`` instead. Unscoped builds (client
+    deliveries, Pro, dev) keep the legacy location unchanged. Restricted to a safe
+    registry-key / file-name charset so a stray value cannot escape the key or the folder.
+    """
+    raw = str(getattr(settings, "LICENSE_SCOPE", "") or "")
+    return re.sub(r"[^A-Za-z0-9_-]", "", raw)[:32]
+
+
+def _registry_path() -> str:
+    scope = _scope()
+    return f"{_REG_PATH}\\{scope}" if scope else _REG_PATH
 
 
 def _secret() -> bytes:
@@ -116,7 +141,7 @@ def _registry_read():
         return None
     try:
         import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH) as key:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _registry_path()) as key:
             raw, _ = winreg.QueryValueEx(key, _REG_VALUE)
             return json.loads(raw)
     except FileNotFoundError:
@@ -130,7 +155,7 @@ def _registry_write(rec: dict):
         return
     try:
         import winreg
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REG_PATH) as key:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _registry_path()) as key:
             winreg.SetValueEx(key, _REG_VALUE, 0, winreg.REG_SZ, json.dumps(rec))
     except Exception:
         pass
@@ -141,7 +166,9 @@ def _plist_path() -> Path:
     override = getattr(settings, "LICENSE_PLIST_PATH", None)
     if override:
         return Path(override)
-    return Path.home() / "Library" / "Preferences" / "com.codesense.desktop.license.plist"
+    scope = _scope()
+    name = f"{_PLIST_NAME}.{scope}.plist" if scope else f"{_PLIST_NAME}.plist"
+    return Path.home() / "Library" / "Preferences" / name
 
 
 def _plist_read():

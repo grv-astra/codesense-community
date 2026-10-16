@@ -10,7 +10,7 @@ import type {
 } from '@/types/edition';
 
 const FEATURE_KEYS: (keyof EditionFeatures)[] = [
-  'llm_analysis', 'sbom_signing', 'license_compliance', 'api_access',
+  'llm_analysis', 'byo_llm', 'sbom_signing', 'license_compliance', 'api_access',
   'incremental_scan', 'github_scan', 'sso', 'audit_log',
 ];
 const LIMIT_KEYS: (keyof EditionLimits)[] = [
@@ -43,10 +43,10 @@ function catalog(activeEdition: Edition, over = false): EditionsCatalog {
     limit_keys: LIMIT_KEYS,
     editions: [
       entry('community', 'Community', 'low',
-        { github_scan: true },
+        { github_scan: true, byo_llm: true },
         { projects: 1, code_scans_per_window: 25, sbom_scans_per_window: 25, max_codebase_mb: 250, seats: 3 }),
       entry('pro', 'Pro', 'mid',
-        { llm_analysis: true, sbom_signing: true, api_access: true, incremental_scan: true, github_scan: true, license_compliance: true },
+        { llm_analysis: true, byo_llm: true, sbom_signing: true, api_access: true, incremental_scan: true, github_scan: true, license_compliance: true },
         { projects: 10, code_scans_per_window: 500, sbom_scans_per_window: 500, max_codebase_mb: 2048, seats: 25 }),
       entry('enterprise', 'Enterprise', 'high',
         Object.fromEntries(FEATURE_KEYS.map((k) => [k, true])) as EditionFeatures,
@@ -74,7 +74,8 @@ describe('PlansComparison', () => {
 
   it('shows feature rows and Enterprise unlimited limits', () => {
     render(<PlansComparison catalog={catalog('enterprise')} />);
-    expect(screen.getByText('AI verification & enrichment')).toBeInTheDocument();
+    expect(screen.getByText('Bundled local AI model (verification & enrichment)')).toBeInTheDocument();
+    expect(screen.getByText('Connect your own LLM (verification)')).toBeInTheDocument();
     expect(screen.getByText('SSO / SAML / OIDC')).toBeInTheDocument();
     // Enterprise column: every limit reads "Unlimited"
     expect(screen.getAllByText('Unlimited').length).toBeGreaterThanOrEqual(5);

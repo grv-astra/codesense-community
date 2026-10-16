@@ -10,7 +10,8 @@ _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # Always reachable even in read-only mode (auth + first-run setup + license
 # status + activation). /api/activation matters here specifically: if a
 # machine's registry already carries an EXPIRED license stamp from a prior
-# build/delivery (HKCU\Software\CodeSense\license isn't scoped per-build) but
+# build/delivery (HKCU\Software\CodeSense\license isn't scoped per-build unless the
+# build sets LICENSE_SCOPE, as the Community installer does) but
 # activation hasn't happened yet on this install, activating would otherwise
 # get rejected with a confusing "license expired" error before the user ever
 # gets in.

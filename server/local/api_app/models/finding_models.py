@@ -8,7 +8,7 @@ _FIELDS = [
     "description", "severity", "file_path", "code_snip", "security_risk",
     "mitigation", "status", "deleted", "approved", "reference", "created_at",
     "rule_id", "confidence", "verifier_reason", "flow_diagram", "code_snip_start_line",
-    "fingerprint", "first_seen_scan_id",
+    "fingerprint", "first_seen_scan_id", "report_source",
 ]
 
 
@@ -48,6 +48,7 @@ class FindingModel:
             "code_snip_start_line": finding.code_snip_start_line,   # int | None (None on pre-existing rows)
             "fingerprint": finding.fingerprint or "",
             "first_seen_scan_id": finding.first_seen_scan_id or "",
+            "report_source": finding.report_source or "",
         }
 
     @classmethod

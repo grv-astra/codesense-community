@@ -4,6 +4,16 @@
   One-command Windows build for the Code Sense offline desktop app.
 
 .DESCRIPTION
+  COMMUNITY INSTALLER (-Edition community, the default): ships NO bundled AI model and no
+  llama-server, so -ModelGguf / -LlamaServer are not needed (and ignored). The user's own LLM
+  (Settings > AI verification) is the AI path. It also switches off the client-delivery
+  settings main.rs defaults to (2-scan trial, activation password) and uses the overlay
+  client\src-tauri\tauri.community.conf.json (own product name / identifier, no model resource,
+  WebView2 bootstrapper instead of the fixed runtime). BUILD IT FROM THE COMMUNITY EXPORT
+  (scripts\editions\export_community.py), never from the private source tree: the PyInstaller
+  freeze bundles whatever is in server\, and the source tree contains the Pro-only verifier
+  and enrichment code.
+
   Automates BUILD.md end-to-end on a Windows host:
     1. Freezes the Django backend into codesense-server.exe (PyInstaller).
     2. Downloads the SBOM toolchain (Syft/Grype/Grant/Cosign) - latest releases.
@@ -34,6 +44,9 @@
                        full NSIS build is currently blocked by its 32-bit mmap limit on the model
                        file) is also self-contained -- main.rs points WEBVIEW2_BROWSER_EXECUTABLE_FOLDER
                        at resources\webview2 automatically, no target-machine install required.
+.PARAMETER LicenseDays Days the build's offline licence lasts. Only baked in when given, or for
+                       -Edition community (default 90); otherwise main.rs keeps its own default (the
+                       client delivery's 30). Baked at COMPILE time, so changing it needs a new build.
 .PARAMETER IconLogo    Square PNG used to generate app icons; defaults to client\public\CSlogo.png.
 .PARAMETER SkipTools   Skip downloading the SBOM tools (use what's already staged).
 .PARAMETER SigningCert Path to an Authenticode code-signing cert (.pfx). When set (and the SDK's
@@ -56,6 +69,7 @@ param(
   [string]$EntitlementsPublicKeyPath = $env:ENTITLEMENTS_PUBLIC_KEY_PATH,
   [string]$LlamaServer,
   [string]$WebView2,
+  [string]$LicenseDays,
   [string]$IconLogo,
   [switch]$SkipTools,
   [string]$SigningCert
@@ -101,6 +115,44 @@ $env:CODESENSE_EDITION = $Edition
 $env:MODEL_TIER = $ModelTier
 
 # --------------------------------------------------------------------------- #
+# Community installer: no model, no client-delivery trial/activation
+# --------------------------------------------------------------------------- #
+# These CS_* variables are read at COMPILE time by main.rs (option_env!) -- same mechanism as
+# CODESENSE_EDITION above -- so they must be set in THIS process before `tauri build`. Unset =
+# main.rs keeps its client-delivery defaults, so Pro / Enterprise builds are unchanged.
+#   CS_NO_MODEL=1        no model reassembly, no llama-server, no "AI engine" tray item
+#   CS_TRIAL_MODE=false  the 2-scan capped trial is a client-delivery setting, not for Community
+#   CS_ACTIVATION_HASH=none  no activation-password gate on a public download
+#   CS_LICENSE_DAYS      offline licence length (Community default 90)
+#   CS_LICENSE_SCOPE=Community  the licence clock lives in HKCU\Software\CodeSense\Community, not the
+#                        registry value every Code Sense build for this Windows user shares (where the
+#                        earliest first_seen of ANY earlier build wins)
+#   VITE_BUNDLES_MODEL=0 first-run screen stops talking about an AI model (read by `npm run build`)
+$IsCommunity = ($Edition -eq "community")
+if ($IsCommunity) {
+  $env:CS_NO_MODEL = "1"
+  $env:CS_TRIAL_MODE = "false"
+  $env:CS_ACTIVATION_HASH = "none"
+  $env:CS_LICENSE_SCOPE = "Community"
+  $env:VITE_BUNDLES_MODEL = "0"
+  if (-not $LicenseDays) { $LicenseDays = "90" }
+  if ($ModelGguf -or $LlamaServer) {
+    Write-Warning "Community ships no bundled model: -ModelGguf / -LlamaServer are ignored."
+  }
+} else {
+  # A Community build earlier in this same PowerShell session must not leak into a paid build.
+  foreach ($v in "CS_NO_MODEL", "CS_TRIAL_MODE", "CS_ACTIVATION_HASH", "CS_LICENSE_SCOPE", "VITE_BUNDLES_MODEL") {
+    Remove-Item "Env:\$v" -ErrorAction SilentlyContinue
+  }
+  if (-not $LicenseDays) { Remove-Item Env:\CS_LICENSE_DAYS -ErrorAction SilentlyContinue }
+}
+if ($LicenseDays) {
+  if ($LicenseDays -notmatch '^\d+$' -or [int]$LicenseDays -lt 1) { throw "-LicenseDays must be a positive whole number of days (got '$LicenseDays')." }
+  $env:CS_LICENSE_DAYS = $LicenseDays
+  Write-Host "Licence length baked into this build: $LicenseDays days"
+}
+
+# --------------------------------------------------------------------------- #
 # Paths + helpers
 # --------------------------------------------------------------------------- #
 $RepoRoot   = Split-Path -Parent $PSScriptRoot
@@ -116,6 +168,12 @@ $ResWebview2 = Join-Path $Tauri "resources\webview2"
 # Keep in sync with GRYPE_DB_SCHEMA_VERSION in client\src-tauri\src\main.rs --
 # see the grype-db snapshot step below for why this drifted once already.
 $ExpectedGrypeSchema = "6"
+# Pinned, not "latest": the bundler checks the cached NSIS toolset (%LOCALAPPDATA%\tauri\NSIS) against a
+# hash baked into each CLI release and, on a mismatch, deletes and re-downloads it. CLI 2.12.3 did that to a
+# toolset made by an older CLI and then died with "os error 4395" (a reparse point) while deleting it, so the
+# build could not produce an installer at all. 2.11.4 accepts the existing toolset and produced the installer.
+# Bump deliberately (and re-run a full build) rather than by whatever npx resolves that day.
+$TauriCli = "@tauri-apps/cli@2.11.4"
 $Wv2Dir     = Join-Path $Tauri "webview2"
 
 function Info($m) { Write-Host "==> $m" -ForegroundColor Cyan }
@@ -177,6 +235,13 @@ try {
 # --------------------------------------------------------------------------- #
 # 2. llama-server (provided)
 # --------------------------------------------------------------------------- #
+if ($IsCommunity) {
+  # Community has no local AI engine. Clear anything an earlier non-Community build left in the
+  # staging folders so it can never be bundled by accident (the overlay config also drops it).
+  Info "Community build: no llama-server (clearing any stale AI-engine staging)"
+  Get-ChildItem $ResLlamaRt -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+  Get-ChildItem $BinDir -Filter "llama-server*" -Force -ErrorAction SilentlyContinue | Remove-Item -Force
+} else {
 Info "Staging llama-server"
 if (-not $LlamaServer -or -not (Test-Path $LlamaServer)) {
   Die "Pass -LlamaServer <path to llama-server.exe> (download from a llama.cpp release)."
@@ -205,6 +270,7 @@ if ($llamaDlls.Count -gt 0) {
 } else {
   Info "No sibling DLLs next to llama-server.exe (assuming a static build)."
 }
+}   # end: not Community
 
 # llama-server.exe (and codesense.exe / codesense-server.exe, which end up in
 # the same install/extraction directory) are MSVC-linked and depend on the
@@ -235,6 +301,10 @@ if ($vcStaged -gt 0) { Ok "$vcStaged VC++ runtime DLL(s) staged into resources\l
 # --------------------------------------------------------------------------- #
 # 3. Model GGUF (provided)
 # --------------------------------------------------------------------------- #
+if ($IsCommunity) {
+  Info "Community build: no bundled model (clearing any stale model staging)"
+  Get-ChildItem $ResModel -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+} else {
 Info "Staging model GGUF (tier: $ModelTier)"
 if (-not $ModelGguf -or -not (Test-Path $ModelGguf)) {
   Die "Pass -ModelGguf <path to the .gguf model> (see scripts/offline_ai/). Target tier '$ModelTier' (mid = Apache 7B-Instruct)."
@@ -246,6 +316,7 @@ Ok "model ($ModelTier tier, $gb GB) staged as resources\model\astra.gguf"
 Info "Splitting model into <2GB parts (NSIS/MSI installer size workaround)"
 & (Join-Path $PSScriptRoot "split_asset.ps1") -Path (Join-Path $ResModel "astra.gguf")
 Ok "model split into parts + manifest.json in resources\model"
+}   # end: not Community
 
 # --------------------------------------------------------------------------- #
 # 4. SBOM tools (Syft / Grype / Grant / Cosign) - latest releases via GitHub API
@@ -371,8 +442,13 @@ if (Test-Path $grypeExe) {
     if (Test-Path $vulnDb) {
       Ok "Grype DB snapshot (schema $($schemaDir.Name)) staged flat in resources\grype-db (frozen; AUTO_UPDATE off at runtime)"
       Info "Splitting vulnerability.db into <2GB parts (NSIS/MSI installer size workaround)"
-      & (Join-Path $PSScriptRoot "split_asset.ps1") -Path $vulnDb
-      Ok "vulnerability.db split into parts + manifest.json in resources\grype-db"
+      # Community ships through NSIS, which cannot package more than ~1.9 GB of data in total (32-bit
+      # mmap: "error mmapping file ... out of range"). The DB is ~3 GB but gzips ~8x, so compress it
+      # and let the launcher expand it on first launch. Other editions keep today's plain parts.
+      $splitArgs = @{ Path = $vulnDb }
+      if ($IsCommunity) { $splitArgs.Compress = $true }
+      & (Join-Path $PSScriptRoot "split_asset.ps1") @splitArgs
+      Ok "vulnerability.db split into parts + manifest.json in resources\grype-db$(if ($IsCommunity) { ' (gzip-compressed)' })"
     } else {
       Write-Warning "vulnerability.db not found at $vulnDb after db update; skipping split."
     }
@@ -404,7 +480,12 @@ if ($LASTEXITCODE -ne 0) {
 # --------------------------------------------------------------------------- #
 # 6. WebView2 fixed runtime + icons
 # --------------------------------------------------------------------------- #
-if ($WebView2 -and (Test-Path $WebView2)) {
+if ($IsCommunity) {
+  # Community uses the small embedded WebView2 bootstrapper (tauri.community.conf.json); make sure a
+  # fixed runtime left by an earlier Pro / client build cannot be bundled and bloat the installer.
+  if ($WebView2) { Write-Warning "Community uses the WebView2 bootstrapper: -WebView2 is ignored." }
+  Remove-Item $Wv2Dir, $ResWebview2 -Recurse -Force -ErrorAction SilentlyContinue
+} elseif ($WebView2 -and (Test-Path $WebView2)) {
   Info "Staging fixed-version WebView2 runtime"
   Ensure-Dir $Wv2Dir
   Copy-Item (Join-Path $WebView2 "*") $Wv2Dir -Recurse -Force
@@ -436,7 +517,7 @@ if (-not $IconLogo) {
 if ($IconLogo -and (Test-Path $IconLogo)) {
   Info "Generating app icons from $IconLogo"
   Push-Location $Client
-  try { Invoke-Native { npx --yes @tauri-apps/cli icon $IconLogo } "Tauri icon generation" }
+  try { Invoke-Native { npx --yes $TauriCli icon $IconLogo } "Tauri icon generation" }
   finally { Pop-Location }
   Ok "Icons generated into src-tauri\icons"
 } else {
@@ -448,7 +529,7 @@ if ($IconLogo -and (Test-Path $IconLogo)) {
 # --------------------------------------------------------------------------- #
 $wv2HasFiles = (Test-Path $Wv2Dir) -and (@(Get-ChildItem $Wv2Dir -Force -ErrorAction SilentlyContinue).Count -gt 0)
 $confJson = Join-Path $Tauri "tauri.conf.json"
-if (-not $wv2HasFiles -and (Test-Path $confJson) -and (Select-String -Path $confJson -Pattern 'fixedRuntime' -Quiet)) {
+if (-not $IsCommunity -and -not $wv2HasFiles -and (Test-Path $confJson) -and (Select-String -Path $confJson -Pattern 'fixedRuntime' -Quiet)) {
   Write-Host "ERROR: tauri.conf.json requests a FIXED WebView2 runtime but src-tauri\webview2\ is empty." -ForegroundColor Red
   Write-Host "  Offline installer: re-run with -WebView2 <fixed-version-runtime-folder>" -ForegroundColor Yellow
   Write-Host "  Online installer : set webviewInstallMode.type to 'downloadBootstrapper' in" -ForegroundColor Yellow
@@ -463,7 +544,12 @@ Info "Building the Tauri installer (this compiles Rust + bundles - can take seve
 Push-Location $Client
 try {
   Invoke-Native { npm install } "npm install"
-  Invoke-Native { npx --yes @tauri-apps/cli build } "Tauri build"
+  # Community: merge the overlay (own name/identifier, no model resource, WebView2 bootstrapper).
+  $tauriArgs = @()
+  if ($IsCommunity) { $tauriArgs += @("--config", "src-tauri/tauri.community.conf.json") }
+  # The CLI is fetched by npx (not pinned in package.json): record exactly which one built this.
+  Info ("Tauri CLI: " + ((& npx --yes $TauriCli --version) -join " "))
+  Invoke-Native { npx --yes $TauriCli build @tauriArgs } "Tauri build"
 } finally { Pop-Location }
 
 $bundle = Join-Path $Tauri "target\release\bundle\nsis"
@@ -526,6 +612,15 @@ if ($installers.Count -gt 0) {
     $sizeMb = [math]::Round($inst.Length / 1MB, 1)
     Ok "Installer: $($inst.FullName) ($sizeMb MB)"
   }
+  # SHA-256 of what was built (after signing, if any), written beside the installer so it can be
+  # published next to the download and users can verify what they got.
+  $sumLines = foreach ($inst in $installers) {
+    "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $inst.FullName).Hash.ToLower(), $inst.Name
+  }
+  $sumFile = Join-Path $bundle "SHA256SUMS.txt"
+  [System.IO.File]::WriteAllText($sumFile, (($sumLines -join "`n") + "`n"))
+  Ok "SHA-256 written to $sumFile"
+  $sumLines | ForEach-Object { Write-Host "    $_" }
 } else {
   Write-Warning "NSIS bundle dir not found at $bundle - check the Tauri build output above."
 }

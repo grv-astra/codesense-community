@@ -1,3 +1,5 @@
+import type { LlmScanMetrics } from './llm';
+
 interface FindingsProgress {
     total: number,
     processed: number,
@@ -7,6 +9,8 @@ interface FolderMetrics {
     total_functions: number,
     languages: string[],
     findings_progress?: FindingsProgress,
+    /** How AI verification went for this scan (absent on scans from before it was recorded). */
+    llm?: LlmScanMetrics,
 }
 export interface SeverityCounts {
   critical: number;

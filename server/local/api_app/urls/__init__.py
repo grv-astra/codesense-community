@@ -5,5 +5,6 @@ urlpatterns = [
     path('projects/<str:project_id>/api-keys/', include('local.api_app.urls.apikey_urls')),
     path('scans/', include('local.api_app.urls.scan_urls')),
     path('findings/', include('local.api_app.urls.finding_urls')),
-    path('dashboard/', DashboardView.as_view())
+    path('dashboard/', DashboardView.as_view()),
+    path('', include('local.api_app.urls.llm_urls')),
 ]

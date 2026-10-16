@@ -13,11 +13,12 @@ Authoritative source for every value below: `server/licenses/editions.py`
 
 ## 1. The three editions
 
-### Feature matrix (all 8 feature flags)
+### Feature matrix (all 9 feature flags)
 
 | Feature flag         | What it gates                                             | Community | Pro | Enterprise |
 |----------------------|----------------------------------------------------------|:---------:|:---:|:----------:|
-| `llm_analysis`       | LLM verifier (TP/FP) + report enrichment                 |    off    | on  |     on     |
+| `llm_analysis`       | Bundled local model: premium LLM verifier (TP/FP) + report enrichment |    off    | on  |     on     |
+| `byo_llm`            | Connect **your own** LLM (OpenAI-compatible or Anthropic API) to verify findings — see §10 |  **on**   | on  |     on     |
 | `sbom_signing`       | cosign SBOM signing + verification                       |    off    | on  |     on     |
 | `license_compliance` | `grant` license-policy findings                          |    off    | on  |     on     |
 | `api_access`         | REST / CI-CD access via API keys                         |    off    | on  |     on     |
@@ -26,8 +27,8 @@ Authoritative source for every value below: `server/licenses/editions.py`
 | `sso`                | RESERVED (Enterprise) — not yet enforced                 |    off    | off |     on     |
 | `audit_log`          | RESERVED (Enterprise) — not yet enforced                 |    off    | off |     on     |
 
-Community has every feature **off except `github_scan`**. Pro has everything on
-**except `sso` and `audit_log`**. Enterprise has everything on.
+Community has every feature **off except `github_scan` and `byo_llm`**. Pro has
+everything on **except `sso` and `audit_log`**. Enterprise has everything on.
 
 ### Limits table (all 6 scale limits)
 
@@ -240,9 +241,11 @@ CODESENSE_EDITION=enterprise ./manage.py runserver
 ## 7. What Community loses vs Pro / Enterprise
 
 With `llm_analysis` off:
-- **No AI verify/enrich.** Every OpenGrep finding is kept as-is and surfaced as a
-  low-confidence result — there is no LLM pass to mark findings TP/FP or to write
-  enriched descriptions / remediation.
+- **No bundled AI model.** Community does not ship the local model or the premium
+  verifier/enrichment. Unless you connect your own LLM (§10, available in every
+  edition, for both verification and mitigation advice), every OpenGrep finding is
+  kept as-is and surfaced as a low-confidence result with the standard rule text — there
+  is no LLM pass to mark findings TP/FP or to write descriptions / remediation.
 
 With `sbom_signing` off:
 - **No cosign SBOM signing.** SBOMs are produced but not signed or verified.
@@ -280,3 +283,64 @@ scan a public GitHub repo) is the one feature Community keeps.
 defaults the model tier to **`low`** (previously `mid`). To restore the old
 behaviour pass `MODEL_TIER=mid`, or set `EDITION=pro` (which implies `mid`) /
 `EDITION=enterprise` (`high`).
+
+---
+
+## 10. Connect your own LLM (`byo_llm`, every edition)
+
+Any edition, Community included, can verify findings (true / false positive) and write
+their mitigation advice with an LLM you already have. **Off by default; nothing leaves the
+machine until an admin turns it on and confirms.**
+
+**Set up (admin):** *Settings → AI verification — your own LLM*. Pick a provider
+preset (OpenAI, Azure OpenAI, Anthropic, Google Gemini / Mistral / Groq via their
+OpenAI-compatible endpoints, Ollama, LM Studio, vLLM, or any custom OpenAI-compatible
+URL), enter the model and API key, use **Test connection**, then switch
+**Use my LLM for scans** on and confirm the data-sharing dialog. The dashboard shows
+an *AI verification* health light next to the edition badge.
+
+**Supported now:** OpenAI-compatible chat-completions APIs (incl. Azure OpenAI) and the
+native Anthropic Messages API. HTTP(S) APIs only. Native Gemini, AWS Bedrock, Vertex and a
+locked-down CLI adapter are planned.
+
+**What is sent (per finding):** the weakness type (e.g. CWE-89) and language, the
+source-to-sink data-flow lines, and a code excerpt of up to 1800 characters. **Not sent:**
+file names/paths, repository / project / user names, any other file. The API key goes only
+to the LLM host you configure.
+
+**Mitigation advice** (switch *Also write mitigation advice*, on by default): a second model
+call per finding that stays visible writes its title, description, impact and **Mitigation
+Steps**, replacing the generic rule text (which keeps the rule's reference links when the call
+fails). It additionally sends the analyzer rule name and the analyzer's one-line message (up to
+400 characters), plus the same data-flow lines and excerpt again; still no file paths. Expect
+about twice the calls and tokens. It needs its own confirmation: consent given while the switch
+was off, or before it existed, covers verification only, and the settings page asks you to
+confirm. The advice is model-written text, labelled "written by an AI model" on the finding,
+CWE / severity / location are never model-written, and a failing or unusable reply leaves the
+finding exactly as it would have been without the switch. Mitigation calls are counted
+separately and can never stop verification partway through a scan.
+
+**Safety rules built in**
+- The API key is encrypted at rest, write-only (never returned by any API), and
+  scrubbed from logs and error messages.
+- Consent is bound to the host. Changing the URL's host turns the connection off, drops the
+  saved key and asks again.
+- The URL is checked on save, on *Test connection* and before every request: `https`
+  required for remote hosts; local / private-network hosts (Ollama, LAN, tailnet) may use
+  `http`; link-local and cloud-metadata addresses are blocked; redirects are not followed.
+- Scanned code is sent as untrusted data; the reply must be a strict
+  `{verdict, reason, confidence}` object. A *false positive* verdict is honoured only at
+  confidence ≥ 0.8 — otherwise the finding stays visible, marked unverified.
+- **Fail-open:** if the LLM is down, slow, rate-limiting or returns garbage, the scan still
+  completes; findings are kept as low-confidence and marked unverified. A broken connection
+  is detected up front and, if it breaks mid-scan, calls stop so the scan is not slowed down.
+
+**Precedence:** your own LLM, when enabled and working, is used instead of the bundled model
+(Pro / Enterprise), for verification and for mitigation advice. The bundled-model settings
+(`VLLM_*`, `LLM_MODEL_MODE`) are unchanged.
+
+**API (admin JWT):** `GET/PUT /api/settings/llm/`, `POST /api/settings/llm/test/`;
+`GET /api/llm/status/` (any user with *view scans*) for the health state.
+
+**Network note:** the Code Sense server makes the outbound call. In locked-down environments
+allow it to reach your LLM host, or point it at a local model.

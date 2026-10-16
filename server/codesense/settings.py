@@ -198,6 +198,10 @@ LOCAL_KEYS_DIR = os.getenv("LOCAL_KEYS_DIR")
 # Offline license (Phase 4): self-contained, runs N days from first launch.
 LICENSE_DURATION_DAYS = int(os.getenv("LICENSE_DURATION_DAYS", "90"))
 LICENSE_SECRET = os.getenv("LICENSE_SECRET")  # build-injected; dev falls back to a constant
+# Keeps this product's licence clock in its own registry key / plist instead of the one every
+# build shares (licenses/services/offline_license.py::_scope). Empty = the shared legacy store.
+# Build-injected by main.rs from CS_LICENSE_SCOPE (the Community installer sets "Community").
+LICENSE_SCOPE = os.getenv("LICENSE_SCOPE", "")
 
 # One-time activation gate (Phase: client-delivery hardening). A bcrypt hash of
 # the activation password, build-injected via main.rs -- unset in dev/from-

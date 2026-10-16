@@ -1,7 +1,7 @@
 export type Edition = 'community' | 'pro' | 'enterprise';
 
 export interface EditionFeatures {
-  llm_analysis: boolean; sbom_signing: boolean; license_compliance: boolean;
+  llm_analysis: boolean; byo_llm: boolean; sbom_signing: boolean; license_compliance: boolean;
   api_access: boolean; incremental_scan: boolean; github_scan: boolean;
   sso: boolean; audit_log: boolean;
 }

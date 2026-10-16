@@ -98,3 +98,10 @@ after first run (read-only grace thereafter); bump `LICENSE_DURATION_DAYS` or se
 Set before `pyinstaller` so they're baked into the backend exe env (or have the
 Tauri launcher export them): `LICENSE_DURATION_DAYS`, `LICENSE_SECRET`,
 `DJANGO_SECRET_KEY` (else a per-install key is generated and persisted).
+
+The licence clock is kept in `license.json` (data dir) **and** the registry value
+`HKCU\Software\CodeSense\license`, which is outside the data dir and shared by every Code Sense
+build run by the same Windows user (the earliest `first_seen` wins). A build that sets
+`LICENSE_SCOPE` (baked from the build-time env `CS_LICENSE_SCOPE`; `build_windows.ps1
+-Edition community` sets `Community`) uses `HKCU\Software\CodeSense\<scope>` instead, so it
+neither inherits nor leaves a date for other builds. Unscoped builds are unchanged.

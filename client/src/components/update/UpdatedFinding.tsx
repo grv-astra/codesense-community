@@ -240,6 +240,17 @@ function Finding({ finding }: FindingProps) {
         {/* Content: main column (the reading path) + a compact details sidebar */}
         <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
           <div className={`space-y-6 ${hasFlowDiagram ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
+            {/* The description, risk and mitigation below are model-written when report_source is "ai" */}
+            {currentFinding.report_source === 'ai' && (
+              <p
+                className="text-xs text-gray-600 dark:text-gray-400 bg-gray-500/10 dark:bg-gray-500/20 rounded px-3 py-2"
+                data-testid="ai-written-note"
+              >
+                The title, description, risk and mitigation steps below were written by an AI model from this
+                finding's code. Review them before applying.
+              </p>
+            )}
+
             {/* Description */}
             <section>
               <SectionLabel icon={FileText}>Description</SectionLabel>

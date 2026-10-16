@@ -10,7 +10,7 @@ import subprocess
 
 from scanner.rag.semgrep_detector import (
     run_semgrep, parse_semgrep_json, derive_cwe, _extract_taint_trace, _read_code_lines,
-    _read_code_lines_with_context, SemgrepDetectionError)
+    _read_code_lines_with_context, _long_path_safe, SemgrepDetectionError)
 from scanner.rag.lsast_types import SemgrepFinding
 
 
@@ -58,14 +58,40 @@ class RunSemgrepTests(SimpleTestCase):
         self.assertIn("--config", cmd)
         self.assertIn("/rules", cmd)
         self.assertIn("--json", cmd)
-        # On Windows the target is made long-path-safe (abspath + \\?\ prefix,
-        # see run_semgrep's _long_path_safe) rather than passed through as
-        # given -- assert on that transformation instead of the raw literal.
+        # On Windows the target is passed as a plain absolute path (the \\?\ prefix is only added
+        # for very long paths, see _long_path_safe) rather than as given.
         if os.name == "nt":
-            expected_target = "\\\\?\\" + os.path.abspath("/some/code/path")
+            expected_target = os.path.abspath("/some/code/path")
         else:
             expected_target = "/some/code/path"
         self.assertIn(expected_target, cmd)
+
+    @unittest.skipUnless(os.name == "nt", "the extended-length prefix is a Windows concern")
+    def test_long_path_prefix_only_for_long_paths(self):
+        # Regression: with the \\?\ prefix OpenGrep silently scanned NOTHING when any folder in the
+        # path was named like a default-ignored one (build/, dist/, ...), e.g. an app-data dir
+        # under C:\build. Ordinary paths must stay plain.
+        short = r"C:\build\data\media\scans\abc\source"
+        self.assertEqual(_long_path_safe(short), short)
+        self.assertFalse(_long_path_safe(short).startswith("\\\\?\\"))
+        long_path = "C:\\" + "\\".join(["nested-folder-name"] * 14)         # well past the threshold
+        self.assertGreater(len(long_path), 200)
+        self.assertEqual(_long_path_safe(long_path), "\\\\?\\" + long_path)
+        already = "\\\\?\\" + long_path
+        self.assertEqual(_long_path_safe(already), already)                 # idempotent
+
+    @unittest.skipUnless(os.name == "nt", "the extended-length prefix is a Windows concern")
+    @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
+    @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
+    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    def test_a_target_under_a_build_folder_is_not_given_the_prefix(self, mock_run, _bin, _rules):
+        mock_run.return_value = mock.Mock(returncode=0, stdout='{"results":[]}', stderr="")
+        target = r"C:\build\data\media\scans\abc\source"
+        run_semgrep(target)
+        cmd = mock_run.call_args.args[0]
+        self.assertIn(target, cmd)
+        self.assertFalse(any(str(c).startswith("\\\\?\\") for c in cmd))
+
 
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
