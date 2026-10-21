@@ -429,3 +429,141 @@ class RunSemgrepFileListTargetTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
             shutil.rmtree(rules_dir, ignore_errors=True)
+
+
+class FolderTargetTests(SimpleTestCase):
+    """A whole folder is scanned from INSIDE it (relative target '.'), because the engine matches its
+    default ignore patterns (build/, dist/, test/, ...) against the path it is given and scans nothing
+    when any folder ABOVE the code has such a name. Results come back folder-relative and are made
+    absolute again."""
+
+    def setUp(self):
+        import tempfile, shutil
+        self.tmp = tempfile.mkdtemp(prefix="codesense_folder_target_")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _run(self, target, stdout='{"results":[]}', rules="/rules"):
+        with mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value=rules), \
+             mock.patch("scanner.rag.semgrep_detector.get_privacy_rules_dir", return_value=""), \
+             mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep"), \
+             mock.patch("scanner.rag.semgrep_detector.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=0, stdout=stdout, stderr="")
+            findings = run_semgrep(target)
+        return findings, mock_run
+
+    def test_an_existing_folder_is_scanned_from_inside_it_with_a_relative_target(self):
+        findings, mock_run = self._run(self.tmp, stdout=FIXTURE.read_text())
+        self.assertEqual(mock_run.call_args.kwargs["cwd"], os.path.abspath(self.tmp))
+        self.assertEqual(mock_run.call_args.args[0][-1], ".")
+        self.assertFalse(any(os.path.abspath(self.tmp) == str(c) for c in mock_run.call_args.args[0]))
+        # the engine reported "app/views.py" relative to the folder; it is joined back on
+        self.assertEqual(findings[0].file_path, os.path.normpath(os.path.join(self.tmp, "app", "views.py")))
+
+    def test_it_makes_no_difference_what_the_folders_above_are_called(self):
+        for ancestor in ("build", "dist", "test", "tests", "vendor", "plain"):
+            deep = os.path.join(self.tmp, ancestor, "x", "source")
+            os.makedirs(deep)
+            _findings, mock_run = self._run(deep)
+            self.assertEqual(mock_run.call_args.kwargs["cwd"], os.path.abspath(deep), ancestor)
+            self.assertEqual(mock_run.call_args.args[0][-1], ".", ancestor)
+
+    def test_a_missing_folder_falls_back_to_the_absolute_target(self):
+        missing = os.path.join(self.tmp, "does-not-exist")
+        _findings, mock_run = self._run(missing)
+        self.assertIsNone(mock_run.call_args.kwargs["cwd"])
+        self.assertEqual(mock_run.call_args.args[0][-1], os.path.abspath(missing) if os.name == "nt" else missing)
+
+    def test_a_single_file_target_is_not_scanned_from_a_working_directory(self):
+        path = os.path.join(self.tmp, "app.py")
+        open(path, "w").close()
+        _findings, mock_run = self._run(path)
+        self.assertIsNone(mock_run.call_args.kwargs["cwd"])
+        self.assertIn(os.path.abspath(path) if os.name == "nt" else path, mock_run.call_args.args[0])
+
+    def test_an_explicit_file_list_keeps_absolute_paths_and_no_working_directory(self):
+        files = []
+        for name in ("a.py", "b.py"):
+            p = os.path.join(self.tmp, name)
+            open(p, "w").close()
+            files.append(p)
+        _findings, mock_run = self._run(files)
+        self.assertIsNone(mock_run.call_args.kwargs["cwd"])
+        for p in files:
+            self.assertIn(os.path.abspath(p) if os.name == "nt" else p, mock_run.call_args.args[0])
+
+    def test_a_relative_rules_directory_is_made_absolute_before_the_working_directory_changes(self):
+        rules = os.path.join(self.tmp, "rules")
+        os.makedirs(rules)
+        try:
+            relative = os.path.relpath(rules, os.getcwd())
+        except ValueError:
+            self.skipTest("no relative path between the temp dir and the working directory")
+        self.assertFalse(os.path.isabs(relative))
+        scan_dir = os.path.join(self.tmp, "src")
+        os.makedirs(scan_dir)
+        _findings, mock_run = self._run(scan_dir, rules=relative)
+        cmd = mock_run.call_args.args[0]
+        self.assertIn(os.path.abspath(rules), cmd)
+        self.assertNotIn(relative, cmd)
+
+    def test_absolutize_leaves_absolute_paths_alone_and_fixes_relative_ones(self):
+        from scanner.rag.semgrep_detector import _absolutize_paths
+        absolute = os.path.abspath(os.path.join(self.tmp, "already", "abs.py"))
+        fs = [SemgrepFinding(rule_id="r", cwe="", severity="high", message="", file_path=absolute,
+                             start_line=1, end_line=1, code_excerpt="", taint_trace=[],
+                             sanitizers_observed=[], references=[], fix=""),
+              SemgrepFinding(rule_id="r", cwe="", severity="high", message="", file_path=os.path.join("sub", "x.py"),
+                             start_line=1, end_line=1, code_excerpt="", taint_trace=[],
+                             sanitizers_observed=[], references=[], fix="")]
+        _absolutize_paths(fs, self.tmp)
+        self.assertEqual(fs[0].file_path, absolute)
+        self.assertEqual(fs[1].file_path, os.path.normpath(os.path.join(self.tmp, "sub", "x.py")))
+
+    @unittest.skipUnless(os.name == "nt", "Windows limits a working directory to about MAX_PATH")
+    def test_a_folder_too_deep_for_a_working_directory_keeps_the_prefixed_absolute_target(self):
+        from scanner.rag.semgrep_detector import _folder_target
+        deep = "C:\\" + "\\".join(["nested-folder-name"] * 14)
+        with mock.patch("scanner.rag.semgrep_detector.os.path.isdir", return_value=True):
+            args, cwd = _folder_target(deep)
+        self.assertIsNone(cwd)
+        self.assertEqual(args, ["\\\\?\\" + deep])
+
+
+@unittest.skipUnless(bool(os.getenv("SEMGREP_BIN")), "set SEMGREP_BIN to run this test against the real engine")
+class RunSemgrepUnderIgnoredAncestorsTests(unittest.TestCase):
+    """Regression, against the real engine: a scan used to find NOTHING (rc=0, 0 files scanned, no
+    error) when any folder above the code was called build, dist or test."""
+
+    def test_findings_are_the_same_whatever_the_parent_folders_are_called(self):
+        import shutil, tempfile
+        base = tempfile.mkdtemp(prefix="codesense_ancestor_test_")
+        rules_dir = tempfile.mkdtemp(prefix="codesense_ancestor_rules_")
+        try:
+            with open(os.path.join(rules_dir, "cmd.yaml"), "w") as f:
+                f.write(
+                    "rules:\n"
+                    "  - id: test-os-system-call\n"
+                    "    languages: [python]\n"
+                    "    severity: ERROR\n"
+                    "    message: test rule\n"
+                    "    patterns:\n"
+                    "      - pattern: os.system(...)\n"
+                )
+            counts = {}
+            for ancestor in ("plain", "build", "dist", "test"):
+                src = os.path.join(base, ancestor, "x", "source")
+                os.makedirs(os.path.join(src, "build"))                  # the project's OWN build/ stays ignored
+                for rel in ("app.py", os.path.join("build", "skipped.py")):
+                    with open(os.path.join(src, rel), "w") as f:
+                        f.write("import os\nos.system(user_input)\n")
+                with mock.patch.dict(os.environ, {"SEMGREP_RULES_DIR": rules_dir}), \
+                     mock.patch("scanner.rag.semgrep_detector.get_privacy_rules_dir", return_value=""):
+                    found = run_semgrep(src)
+                counts[ancestor] = sorted(os.path.relpath(f.file_path, src) for f in found)
+                self.assertTrue(all(os.path.isabs(f.file_path) for f in found), ancestor)
+            self.assertEqual(counts["plain"], ["app.py"])
+            for ancestor in ("build", "dist", "test"):
+                self.assertEqual(counts[ancestor], ["app.py"], f"nothing/other found under a folder called {ancestor}")
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+            shutil.rmtree(rules_dir, ignore_errors=True)

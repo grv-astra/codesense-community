@@ -349,6 +349,12 @@ def _long_path_safe(path: str) -> str:
     instead, and silently scans nothing if any folder in the path is named like one of them -- e.g. an
     app-data folder under a user or build directory called "build". It also made every finding's path
     absolute with the prefix, which broke path-relative features (incremental scans).
+
+    A plain absolute folder target has the same flaw (verified with the bare engine: a target under
+    ``C:\\zz\\build\\...`` / ``dist`` / ``test`` scans 0 files), so a WHOLE-FOLDER scan does not use this
+    helper any more: see ``_folder_target``. This remains for explicit file targets, which the engine
+    scans regardless of the ignore patterns, and as the fallback for folders too deep for a working
+    directory.
     """
     if os.name != "nt" or path.startswith("\\\\?\\"):
         return path
@@ -358,9 +364,54 @@ def _long_path_safe(path: str) -> str:
     return "\\\\?\\" + absolute
 
 
+def _abs_if_path(value: str) -> str:
+    """``value`` as an absolute path if it names something that exists, else unchanged.
+
+    The engine is run from inside the folder being scanned (see ``_folder_target``), so any relative
+    path on its command line (rules directory, binary) has to be fixed up first. Registry packs such as
+    ``p/security-audit`` and bare command names are not paths and are left alone.
+    """
+    absolute = os.path.abspath(value)
+    return absolute if os.path.exists(absolute) else value
+
+
+def _folder_target(path: str) -> tuple[list[str], str | None]:
+    """How to point the engine at a WHOLE folder: ``(target arguments, working directory)``.
+
+    The engine matches its default ignore patterns (build/, dist/, vendor/, test/, tests/, ...) against
+    the path it was given, so with an absolute target it silently scans nothing -- no error, 0 findings
+    -- whenever ANY folder above the code is named like one of them: a Windows account called "test",
+    an app-data or CI directory under ``C:\\build``, a checkout under ``/home/ci/dist``. Scanning from
+    inside the folder with the target ``.`` makes every pattern relative to the code's own root, which
+    is what the ignore list is meant for (the project's own ``build/`` is still skipped, its ancestors
+    are irrelevant).
+
+    The caller then gets paths relative to that folder and must make them absolute again
+    (``_absolutize_paths``). Falls back to the old absolute target when the folder does not exist or,
+    on Windows, is too deep to be a working directory (CreateProcess limits it to about MAX_PATH).
+    """
+    absolute = os.path.abspath(path)
+    if os.path.isdir(absolute) and (os.name != "nt" or len(absolute) < _LONG_PATH_THRESHOLD):
+        return ["."], absolute
+    return [_long_path_safe(path)], None
+
+
+def _absolutize_paths(findings: list[SemgrepFinding], base_dir: str) -> None:
+    """Join the engine's folder-relative result paths back onto ``base_dir`` (in place)."""
+    for f in findings:
+        if f.file_path and not os.path.isabs(f.file_path):
+            f.file_path = os.path.normpath(os.path.join(base_dir, f.file_path))
+
+
 def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
     bin_path = get_semgrep_bin()
+    if bin_path and (os.sep in bin_path or "/" in bin_path):
+        bin_path = _abs_if_path(bin_path)      # the engine may run from another working directory
     rules_dir = get_semgrep_rules_dir()
+    if rules_dir:
+        rules_dir = _abs_if_path(rules_dir)
+    # Set when a whole folder is scanned from inside it (see _folder_target); None = run from here.
+    cwd: str | None = None
 
     cmd = [bin_path]
     if rules_dir:
@@ -373,7 +424,7 @@ def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
     # upstream-cloned rules_dir so it survives that tree's re-staging.
     privacy_rules_dir = get_privacy_rules_dir()
     if privacy_rules_dir:
-        cmd += ["--config", privacy_rules_dir]
+        cmd += ["--config", _abs_if_path(privacy_rules_dir)]
     # No "--metrics off": the bundled engine is OpenGrep, which has no telemetry
     # and rejects that flag (rc=2). Upstream Semgrep (dev/eval) telemetry is
     # disabled via SEMGREP_SEND_METRICS in the env below instead.
@@ -419,7 +470,8 @@ def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
                     "(%d files) -- falling back to scanning the common folder "
                     "%r instead", len(target), common_root,
                 )
-                cmd += [_long_path_safe(common_root)]
+                folder_args, cwd = _folder_target(common_root)
+                cmd += folder_args
             except ValueError:
                 # No common path exists (e.g. different drives) -- fall back
                 # to the original per-file behavior; this is no worse than
@@ -428,7 +480,10 @@ def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
         else:
             cmd += safe_targets
     else:
-        cmd += [_long_path_safe(target)]
+        # A whole folder is scanned from inside it, not by absolute path: with an absolute target the
+        # engine scans nothing at all if any folder above the code is named build, dist or test.
+        folder_args, cwd = _folder_target(target)
+        cmd += folder_args
 
     # Force a UTF-8 environment. The frozen OpenGrep/Semgrep reads rule YAMLs
     # using the process locale; a non-UTF-8 host locale makes it fall back to
@@ -453,7 +508,7 @@ def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
     env["LANG"] = "C.UTF-8"
     env["SEMGREP_SEND_METRICS"] = "off"
 
-    logger.info("Running Semgrep: %s", shlex.join(cmd))
+    logger.info("Running Semgrep%s: %s", f" (from inside {cwd})" if cwd else "", shlex.join(cmd))
     try:
         # Decode the engine's output as UTF-8 explicitly. Without `encoding`, text=True uses the
         # host locale codec (cp1252 on many Windows machines), and the first byte that codec
@@ -463,7 +518,7 @@ def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
         # stray malformed byte from discarding an entire scan's results.
         result = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=_TIMEOUT_SECONDS, check=False, env=env,
+            timeout=_TIMEOUT_SECONDS, check=False, env=env, cwd=cwd,
         )
     except subprocess.TimeoutExpired as exc:
         logger.error("Semgrep timed out after %ds: %s", _TIMEOUT_SECONDS, exc)
@@ -488,6 +543,8 @@ def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
         return []
 
     findings = parse_semgrep_json(result.stdout)
+    if cwd:
+        _absolutize_paths(findings, cwd)
     if not findings:
         # parse_semgrep_json() only ever returns the results list -- it silently
         # discards semgrep's own "errors"/"skipped_rules"/"paths.scanned" fields,
