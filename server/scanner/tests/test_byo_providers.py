@@ -110,7 +110,10 @@ class OpenAICompatTests(ProviderTestBase):
         self.server.reply(200, {"choices": []})
         with self.assertRaises(ProviderBadResponse):
             self.provider().complete_json("s", "u")
-        self.server.reply_openai("   ")
+        # A blank reply is retried with a bigger budget (see test_byo_empty_reply), so it takes one
+        # blank answer per budget step before the call gives up.
+        for _ in range(3):
+            self.server.reply_openai("   ")
         with self.assertRaises(ProviderBadResponse):
             self.provider().complete_json("s", "u")
 

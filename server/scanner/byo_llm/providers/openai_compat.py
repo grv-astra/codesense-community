@@ -8,6 +8,9 @@ and, when the server answers HTTP 400 naming an unsupported parameter, adapts on
 per quirk and retries: drops ``response_format``, switches ``max_tokens`` to
 ``max_completion_tokens`` (newer OpenAI models), drops ``temperature`` (models that
 only accept the default). The learned settings are kept for the life of the instance.
+
+An empty reply (a reasoning model that used its token budget thinking) is retried with a bigger
+budget, and the budget that worked is remembered the same way.
 """
 from __future__ import annotations
 
@@ -16,10 +19,23 @@ from urllib.parse import quote
 from ..config import DEFAULT_AZURE_API_VERSION
 from . import _http
 from .base import (
-    Provider, ProviderBadResponse, ProviderConfigError, ProviderRequestError, ProviderResult,
+    Provider, ProviderBadResponse, ProviderConfigError, ProviderEmptyReply, ProviderRequestError,
+    ProviderResult,
 )
 
 _MAX_ADAPTATIONS = 3
+
+# A reasoning model can spend the whole reply budget on hidden thinking and answer with nothing. On an
+# empty reply the call is retried with a bigger budget (x4, then x8 of what the caller asked for, never
+# above _MAX_REPLY_BUDGET), and the step that worked is kept for the rest of the instance's life, so the
+# next findings do not each pay for a failed first attempt. The budget is only a ceiling: a model that
+# answers briefly is not billed for it.
+_BUDGET_STEPS = (1, 4, 8)
+_MAX_REPLY_BUDGET = 4096
+_EMPTY_REPLY_MESSAGE = (
+    "The LLM returned an empty reply even with a larger token budget. This usually means a reasoning "
+    "model that spends its tokens thinking; choose a model that answers directly."
+)
 
 
 def _as_int(v) -> int | None:
@@ -32,6 +48,7 @@ class OpenAICompatProvider(Provider):
         self._json_mode = True
         self._token_param = "max_tokens"
         self._send_temperature = True
+        self._budget_step = 0
 
     # -- variant hooks (overridden by AzureOpenAIProvider) -----------------
 
@@ -83,13 +100,19 @@ class OpenAICompatProvider(Provider):
         base = _http.checked_base(self.cfg.base_url)
         secrets = (self.cfg.api_key,)
         url = self._url(base.url)
-        for _ in range(_MAX_ADAPTATIONS + 1):
-            res = _http.post_json(url, self._headers(), self._body(system, user, max_tokens),
+        for _ in range(_MAX_ADAPTATIONS + len(_BUDGET_STEPS)):
+            budget = max(max_tokens, min(max_tokens * _BUDGET_STEPS[self._budget_step], _MAX_REPLY_BUDGET))
+            res = _http.post_json(url, self._headers(), self._body(system, user, budget),
                                   self.cfg.timeout_s, secrets)
             if res.status == 400 and self._adapt(res):
                 continue
             _http.raise_for_status(res, *secrets)
-            return self._parse(res, require_text)
+            try:
+                return self._parse(res, require_text)
+            except ProviderEmptyReply:
+                if self._budget_step + 1 >= len(_BUDGET_STEPS):
+                    raise
+                self._budget_step += 1
         raise ProviderRequestError(400, "The LLM rejected the request parameters.")
 
     @staticmethod
@@ -108,7 +131,7 @@ class OpenAICompatProvider(Provider):
             )
         text = content if isinstance(content, str) else ""
         if require_text and not text.strip():
-            raise ProviderBadResponse("The LLM returned an empty reply.")
+            raise ProviderEmptyReply(_EMPTY_REPLY_MESSAGE)
         usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
         return ProviderResult(text, _as_int(usage.get("prompt_tokens")), _as_int(usage.get("completion_tokens")))
 

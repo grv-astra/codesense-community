@@ -37,7 +37,7 @@ can check the active edition at `GET /api/edition/`.
 | `server/` | Django backend (SQLite) and the scanner pipeline |
 | `client/` | React + Vite UI; `client/src-tauri/` is the desktop shell |
 | `scripts/` | Build scripts and offline tool staging (`scripts/offline_sbom/`) |
-| `docker/`, `docker-compose.yml`, `native-deploy/` | Server deployment |
+| `docker/`, `native-deploy/` | Server deployment (`docker/docker-compose.community.yml`, HTTPS proxy, runbook) |
 | `docs/` | [Architecture](docs/Code_Sense_Architecture.md), [editions](docs/EDITIONS.md), [release notes](docs/RELEASE-NOTES.md) |
 
 ## Getting started
@@ -56,7 +56,7 @@ scripts in `scripts/offline_sbom/` (`fetch_offline_tools.sh`, `stage_semgrep_rul
   accepts browser requests from 5173 by default; for another port set
   `DJANGO_CORS_ALLOWED_ORIGINS`). A fresh data directory opens the first-run setup
   wizard at `/setup`.
-- **Server deployment:** `docker-compose.yml` and `docs/ci-cd/`.
+- **Server deployment:** [`docker/DEPLOY-DIGITALOCEAN.md`](docker/DEPLOY-DIGITALOCEAN.md) (compose file, HTTPS proxy and runbook) and `docs/ci-cd/`.
 
 ## Tests
 

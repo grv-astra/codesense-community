@@ -57,6 +57,11 @@ class ProviderBadResponse(ProviderError):
     """HTTP 200 but the body was not usable (not JSON, no text, too large, a redirect)."""
 
 
+class ProviderEmptyReply(ProviderBadResponse):
+    """HTTP 200 with no text. Usually a reasoning model that spent its whole token budget thinking
+    (finish reason "length"), so the caller may retry the call with a bigger budget."""
+
+
 class Provider(ABC):
     def __init__(self, cfg: ConnectionConfig):
         self.cfg = cfg
