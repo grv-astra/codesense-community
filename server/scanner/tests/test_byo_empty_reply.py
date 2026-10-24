@@ -2,6 +2,8 @@
 a hard failure: five in a row opened the circuit breaker and every remaining finding was left unverified
 (seen with a z-ai GLM model on OpenRouter: 4 verified, 89 unverified). The provider now retries an empty
 reply with a bigger budget and remembers the budget that worked."""
+import threading
+
 from scanner.byo_llm.client import ByoClient
 from scanner.byo_llm.providers.base import ProviderBadResponse, ProviderEmptyReply
 from scanner.tests.test_byo_providers import ProviderTestBase
@@ -86,3 +88,40 @@ class ClientSurvivesAReasoningModelTests(ProviderTestBase):
                 client.complete_json("s", "u")
         self.assertTrue(client.tripped)
         self.assertIn("reasoning model", client.trip_reason)
+
+
+class ParallelWorkersEscalateOnceTests(ProviderTestBase):
+    """The scanner's workers share one provider. Workers that fail at the same step must raise the
+    budget once between them, not once each (two workers used to jump from x1 straight to x8)."""
+
+    def test_escalation_is_compare_and_set(self):
+        provider = self.provider()
+        self.assertTrue(provider._escalate(0))
+        self.assertEqual(provider._budget_step, 1)
+        self.assertTrue(provider._escalate(0))          # a second worker that also failed at step 0
+        self.assertEqual(provider._budget_step, 1)      # ... does not raise it again
+        self.assertTrue(provider._escalate(1))
+        self.assertEqual(provider._budget_step, 2)
+        self.assertFalse(provider._escalate(2))         # nothing above the top step
+        self.assertEqual(provider._budget_step, 2)
+        self.assertTrue(provider._escalate(1))          # a late worker from a lower step just retries
+        self.assertEqual(provider._budget_step, 2)
+
+    def test_two_workers_failing_together_raise_the_budget_once(self):
+        empty = {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}
+        for _ in range(2):                              # both first attempts are in flight at once
+            self.server.reply(200, empty, delay=0.4)
+        for _ in range(2):
+            self.server.reply_openai('{"verdict":"TP"}')
+        provider = self.provider()
+        results = []
+        workers = [threading.Thread(target=lambda: results.append(provider.complete_json("s", "u", 512).text))
+                   for _ in range(2)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(30)
+        self.assertEqual(results, ['{"verdict":"TP"}'] * 2)
+        self.assertEqual(provider._budget_step, 1)
+        sent = sorted(r["json"]["max_tokens"] for r in self.server.requests)
+        self.assertEqual(sent, [512, 512, 2048, 2048])   # never 4096: it did not escalate twice

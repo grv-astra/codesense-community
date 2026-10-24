@@ -14,6 +14,7 @@ budget, and the budget that worked is remembered the same way.
 """
 from __future__ import annotations
 
+import threading
 from urllib.parse import quote
 
 from ..config import DEFAULT_AZURE_API_VERSION
@@ -49,6 +50,7 @@ class OpenAICompatProvider(Provider):
         self._token_param = "max_tokens"
         self._send_temperature = True
         self._budget_step = 0
+        self._budget_lock = threading.Lock()
 
     # -- variant hooks (overridden by AzureOpenAIProvider) -----------------
 
@@ -101,7 +103,8 @@ class OpenAICompatProvider(Provider):
         secrets = (self.cfg.api_key,)
         url = self._url(base.url)
         for _ in range(_MAX_ADAPTATIONS + len(_BUDGET_STEPS)):
-            budget = max(max_tokens, min(max_tokens * _BUDGET_STEPS[self._budget_step], _MAX_REPLY_BUDGET))
+            step = self._budget_step
+            budget = max(max_tokens, min(max_tokens * _BUDGET_STEPS[step], _MAX_REPLY_BUDGET))
             res = _http.post_json(url, self._headers(), self._body(system, user, budget),
                                   self.cfg.timeout_s, secrets)
             if res.status == 400 and self._adapt(res):
@@ -110,10 +113,25 @@ class OpenAICompatProvider(Provider):
             try:
                 return self._parse(res, require_text)
             except ProviderEmptyReply:
-                if self._budget_step + 1 >= len(_BUDGET_STEPS):
+                if not self._escalate(step):
                     raise
-                self._budget_step += 1
         raise ProviderRequestError(400, "The LLM rejected the request parameters.")
+
+    def _escalate(self, failed_step: int) -> bool:
+        """Raise the budget step after an empty reply that was sent at ``failed_step``.
+
+        The scanner's workers share one provider, so several can fail at the same step at once. Only the
+        first of them raises the step; the others find it already raised and just retry at the current
+        one. (Each of them raising it was how two workers jumped from x1 straight to x8 and a thinking
+        model got a ceiling four times higher than it needed.) False = already at the top step.
+        """
+        with self._budget_lock:
+            if self._budget_step > failed_step:
+                return True
+            if failed_step + 1 >= len(_BUDGET_STEPS):
+                return False
+            self._budget_step = failed_step + 1
+            return True
 
     @staticmethod
     def _parse(res, require_text: bool) -> ProviderResult:

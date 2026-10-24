@@ -12,7 +12,7 @@ One droplet runs four containers: **caddy** (HTTPS), **nginx** (limits and block
 | Question | Why it matters |
 |---|---|
 | Domain name and who controls its DNS | Caddy needs an A record pointing at the droplet to get a certificate. |
-| Who may reach it | Start with the DigitalOcean Cloud Firewall allowing only your office or VPN addresses. |
+| Who may reach it | With a domain and HTTPS, ports 80 and 443 must stay open to everyone: Caddy gets its Let's Encrypt certificate over them. The app is protected by sign-in, rate limits and the first-run IP limit. To restrict by address instead, run plain HTTP behind the firewall (section 2). |
 | `LICENSE_DURATION_DAYS` | After this many days from first-run setup the instance goes read-only for everyone. |
 | Licence terms | Put your terms in front of users before anyone outside the team signs in. |
 
@@ -33,7 +33,10 @@ docker compose -f docker/docker-compose.community.yml exec backend python -c \
 - Ubuntu 24.04. **4 vCPU / 8 GB RAM / 80 GB disk** is a comfortable start; 2 vCPU / 4 GB works for small repositories.
   The image build and large scans are the heavy parts. Add 2 GB of swap if you build on the droplet.
 - Turn on DigitalOcean **Backups** (weekly snapshots) in addition to the data backup in section 7.
-- Cloud Firewall: allow 22 from your address only; allow 80 and 443 from the addresses that should reach the app.
+- Cloud Firewall: allow 22 from your address only. Allow **80 and 443 from everywhere**: Caddy gets and renews its
+  certificate over those ports, and a firewall that blocks them makes certificate issuance fail. If you must restrict
+  who can reach the app by address, set `SITE_ADDRESS=http://<droplet-ip>` and open 80 only to those addresses; that
+  instance has no HTTPS, so sign-in passwords and tokens travel unencrypted.
 - DNS: an **A record** for the domain pointing at the droplet's IPv4 address.
 
 ## 3. Install Docker and get the code
@@ -48,7 +51,7 @@ The repository is private: use a read-only deploy key or token that you create a
 cp docker/community.env.example docker/.env
 nano docker/.env
 ```
-Fill in `SITE_ADDRESS`, `SITE_HOST`, `SETUP_ALLOW_IP` (your own public IP), and generate `COSIGN_PASSWORD`
+Fill in `SITE_ADDRESS`, `SITE_HOST`, `SETUP_ALLOW_IP` (your own public IP; section 6 has a fallback if it is refused), and generate `COSIGN_PASSWORD`
 and `LICENSE_SECRET` with `openssl rand -hex 32`. Keep `docker/.env` out of version control.
 
 ## 5. Build and start
@@ -63,6 +66,16 @@ Wait until `backend` shows `healthy`.
 From the machine whose address is `SETUP_ALLOW_IP`, open `https://<your domain>/setup` and create the admin account.
 Anyone else gets a 403 on that step. Do this immediately after the first start. Then, in **Settings**, connect your own
 AI model if you want AI verification (the admin's consent applies to everyone using the instance).
+
+**If the setup page answers 403 from your own machine,** nginx sees a different address than the one in
+`SETUP_ALLOW_IP` (IPv6 instead of IPv4, a VPN, a shared office address). Read the address nginx logged and use that:
+```bash
+docker compose -f docker/docker-compose.community.yml logs nginx --no-log-prefix | grep setup/admin | tail -1
+# the first field is the client address; put it in SETUP_ALLOW_IP in docker/.env, then:
+docker compose -f docker/docker-compose.community.yml up -d nginx
+```
+As a last resort set `SETUP_ALLOW_IP=0.0.0.0/0` (`::/0` for IPv6) only long enough to create the admin, then put the
+real address back and run `up -d nginx` again. While it is open, anyone who reaches the page can create the admin.
 
 Checks: sign in, create a project, scan a small zip, open the findings.
 
