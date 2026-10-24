@@ -4,7 +4,6 @@ import traceback
 
 from .heuristics import build_risk_summary, select_priority_chunks
 from .prompts import create_enhanced_prompt
-from .llm import get_ready_llm
 from .extract import extract_relevant_info
 
 logger = logging.getLogger(__name__)
@@ -66,6 +65,9 @@ def scan_single_file(file_path: str, scan_id: str = None, triggered_by: str = No
         if not chunks:
             return []
 
+        # Lazy: .llm is the bundled-model subsystem, which the Community export leaves out, so a
+        # module-level import would make this whole module unimportable there.
+        from .llm import get_ready_llm
         llm_client = get_ready_llm()
         seen_snippets: set[str] = set()  # dedup findings within the same file
 

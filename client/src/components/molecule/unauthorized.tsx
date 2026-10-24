@@ -2,6 +2,16 @@ import { ShieldAlert, ArrowLeft, Home, Lock, AlertTriangle } from 'lucide-react'
 import { Button } from '../atomic/button';
 import { Card, CardContent, CardHeader } from '../atomic/card';
 
+interface UnauthorizedProps {
+  title?: string;
+  message?: string;
+  showBackButton?: boolean;
+  showHomeButton?: boolean;
+  onBack?: () => void;
+  onHome?: () => void;
+  variant?: "default" | "minimal" | "card";
+}
+
 export const Unauthorized = ({
   title = "Access Denied",
   message = "You don't have permission to access this resource.",
@@ -9,8 +19,8 @@ export const Unauthorized = ({
   showHomeButton = true,
   onBack,
   onHome,
-  variant = "default" // "default", "minimal", "card"
-}) => {
+  variant = "default"
+}: UnauthorizedProps) => {
   const handleBack = () => {
     if (onBack) {
       onBack();

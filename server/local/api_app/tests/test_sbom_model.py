@@ -1,10 +1,12 @@
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from local.api_app.models.sbom_models import SbomModel
 from local.api_app.models.orm import SbomScan
+from scanner.services import sbom_artifacts
 
 
 class SbomModelTests(TestCase):
@@ -81,6 +83,15 @@ class SbomModelTests(TestCase):
             self.assertFalse(output_dir.exists())
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
+
+    def test_delete_scan_removes_artifacts_from_the_data_directory(self):
+        with tempfile.TemporaryDirectory() as data_dir, override_settings(DATA_DIR=Path(data_dir)):
+            s = SbomModel.create({"project_id": "p", "scan_name": "SB"})
+            artifacts = sbom_artifacts.output_dir(s["id"])
+            artifacts.mkdir(parents=True)
+            (artifacts / "sbom-cyclonedx.json").write_text("{}")
+            self.assertTrue(SbomModel.delete_scan(s["id"]))
+            self.assertFalse(artifacts.exists())
 
     def test_delete_scan_is_safe_when_output_directory_missing(self):
         s = SbomModel.create({"project_id": "p", "scan_name": "SB"})

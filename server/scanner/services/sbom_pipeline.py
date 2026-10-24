@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 from local.api_app.models.sbom_models import SbomModel
+from scanner.services import sbom_artifacts
 from scanner.services.tools import tool_path, grype_offline_env, cosign_paths, ensure_cosign_keys
 
 logger = logging.getLogger(__name__)
@@ -408,7 +409,7 @@ def run_project_pipeline(project_path: str, scan_id: str, triggered_by=None, can
     # --------------------------------------------------------
     # Output workspace
     # --------------------------------------------------------
-    output_dir = Path("output") / str(scan_id)
+    output_dir = sbom_artifacts.output_dir(scan_id)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Core artifacts
@@ -584,7 +585,7 @@ def run_project_pipeline(project_path: str, scan_id: str, triggered_by=None, can
 # -----------------------------
 def run_sbom_pipeline(sbom_path: str, scan_id: str, triggered_by=None, cancel_event=None):
 
-    output_dir = Path("output") / str(scan_id)
+    output_dir = sbom_artifacts.output_dir(scan_id)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     normalized_sbom_path = output_dir / "normalized-sbom.json"

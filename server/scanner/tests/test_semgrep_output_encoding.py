@@ -53,13 +53,15 @@ class RunSemgrepOutputEncodingTests(SimpleTestCase):
     @mock.patch("scanner.rag.semgrep_detector.get_privacy_rules_dir", return_value="")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
-    def test_requests_utf8_decoding_with_replacement(self, mock_run, _bin, _rules, _privacy):
+    @mock.patch("scanner.rag.semgrep_detector.subprocess.Popen")
+    def test_requests_utf8_decoding_with_replacement(self, mock_popen, _bin, _rules, _privacy):
         """Locale-independent guard: the call itself must pin the codec, and must not crash the
         whole scan on a stray malformed byte."""
-        mock_run.return_value = mock.Mock(returncode=0, stdout='{"results":[]}', stderr="")
+        proc = mock_popen.return_value
+        proc.communicate.return_value = ('{"results":[]}', "")
+        proc.returncode = 0
         run_semgrep("/code")
-        kwargs = mock_run.call_args.kwargs
+        kwargs = mock_popen.call_args.kwargs
         self.assertEqual(kwargs.get("encoding"), "utf-8")
         self.assertEqual(kwargs.get("errors"), "replace")
 

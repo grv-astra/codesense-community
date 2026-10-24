@@ -1,5 +1,5 @@
 import { DotsLoader } from '@/components/atomic/loader';
-import { sbomDependencyStats } from '@/lib/sbom-stats';
+import { sbomDependencyStats, sbomSigningSummary } from '@/lib/sbom-stats';
 import { useSbomScanDetails } from '@/hooks/use-scans';
 import { useSbomLicenses } from '@/hooks/use-finding';
 import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router'
@@ -54,6 +54,7 @@ function SecurityDashboard() {
   };
 
   if(isLoading) return <DotsLoader />
+  if(!scanData) return <p className="p-4 text-sm text-muted-foreground">This scan could not be loaded.</p>
 
   const getScanDurationSeconds = () => {
     const start = new Date(scanData.created_at).getTime();
@@ -83,6 +84,7 @@ function SecurityDashboard() {
   };
 
   const riskLevel = getRiskLevel();
+  const signingSummary = sbomSigningSummary(scanData.signing, formatTimestamp);
 
   return (
     <div className="">
@@ -228,10 +230,11 @@ function SecurityDashboard() {
                   { label: 'SBOM Format', value: scanData.sbom_format },
                   { label: 'Ecosystems', value: scanData.ecosystems.join(', ') },
                   { label: 'Completed', value: formatTimestamp(scanData.end_time) },
+                  ...(signingSummary ? [{ label: 'Signature', value: signingSummary }] : []),
                 ].map(({ label, value }) => (
                   <div key={label} className="flex items-center justify-between p-3 bg-muted rounded-lg">
                     <span className="text-sm text-muted-foreground">{label}</span>
-                    <span className="text-sm font-medium text-foreground truncate ml-4 max-w-[220px] text-right">{value}</span>
+                    <span className="text-sm font-medium text-foreground truncate ml-4 max-w-[220px] text-right" title={value}>{value}</span>
                   </div>
                 ))}
               </div>

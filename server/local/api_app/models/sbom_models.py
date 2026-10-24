@@ -1,8 +1,7 @@
-import shutil
 from datetime import datetime, timezone
-from pathlib import Path
 from django.db.models import Q
 from local.api_app.models.orm import SbomScan, SbomFinding, SbomLicenseFinding
+from scanner.services import sbom_artifacts
 
 _FINDING_FIELDS = ["scan_id", "package_name", "package_version", "package_type",
                    "cve_id", "severity", "description", "cvss", "fix_versions", "created_at"]
@@ -12,6 +11,21 @@ _LICENSE_FIELDS = ["scan_id", "package_name", "package_version", "package_type",
 
 def _iso(dt):
     return dt.isoformat() if dt else None
+
+
+def _public_signing(record):
+    """The signing result as the API shows it: no server file paths, ``None`` for scans that
+    pre-date signing and so have no record at all."""
+    if not record:
+        return None
+    return {
+        "signed": bool(record.get("sbom_signed")),
+        "verified": bool(record.get("verified")),
+        "verified_at": record.get("verified_at"),
+        "algorithm": record.get("signature_algorithm"),
+        # Set when the edition does not sign (Community); absent for a real result.
+        "skipped_reason": record.get("skipped_reason"),
+    }
 
 
 class SbomModel:
@@ -33,6 +47,7 @@ class SbomModel:
             "sbom_format": scan.sbom_format or "syft-json",
             "end_time": _iso(scan.end_time),
             "cancel_requested": scan.cancel_requested,
+            "signing": _public_signing(scan.sbom_signing),
         }
 
     @staticmethod
@@ -176,7 +191,7 @@ class SbomModel:
             # sbom_pipeline.py writes SBOM/grype/grant reports + the cosign signature
             # bundle to output/<scan_id>/ -- remove it too, or every deleted scan
             # leaks those artifacts on disk forever.
-            shutil.rmtree(Path("output") / str(scan_id), ignore_errors=True)
+            sbom_artifacts.remove_artifacts(scan_id)
             return bool(deleted)
         except Exception:
             return False

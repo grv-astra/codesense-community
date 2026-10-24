@@ -31,3 +31,6 @@ dist/
 # Contains a real one-time client-activation password + hash — must never
 # reach the (public) GitHub remote. Keep local-only.
 /docs/NATIVE_WEB_DEPLOY_RUNBOOK.md
+
+# Local deployment secrets
+docker/.env

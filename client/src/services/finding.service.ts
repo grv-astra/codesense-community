@@ -1,5 +1,5 @@
 import { BaseApiClient } from "@/lib/api";
-import type { FindingDetails, FindingListResponse, LicensesListResponse, UpdateFindingDetails } from "@/types/finding";
+import type { FindingDetails, FindingListResponse, LicensesListResponse, SbomDependenciesResponse, UpdateFindingDetails } from "@/types/finding";
 
 class FindingService extends BaseApiClient {
   async getFindingById(findingId: string): Promise<FindingDetails> {
@@ -16,6 +16,10 @@ class FindingService extends BaseApiClient {
 
    async getSbomLicensesByScan(scanId: string, params?: { page?: number; limit?: number; search?: string }): Promise<LicensesListResponse> {
     return this.get<LicensesListResponse>(`api/findings/sbom/licenses/${scanId}/`, params);
+  }
+
+  async getSbomDependenciesByScan(scanId: string, params?: { page?: number; limit?: number; search?: string }): Promise<SbomDependenciesResponse> {
+    return this.get<SbomDependenciesResponse>(`api/findings/sbom/dependencies/${scanId}/`, params);
   }
 
   async updateFinding(findingId: string,  data: UpdateFindingDetails): Promise<FindingDetails> {

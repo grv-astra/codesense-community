@@ -88,6 +88,24 @@ describe('PlansComparison', () => {
     expect(over.length).toBeGreaterThanOrEqual(1);
   });
 
+  it('says "at limit", not "over limit", when usage equals the cap exactly', () => {
+    const c = catalog('community');
+    c.active.usage.projects = 1;   // community cap is 1
+    c.active.usage.seats = 3;      // community cap is 3
+    render(<PlansComparison catalog={c} />);
+    expect(screen.getByText('1 in use — at limit')).toBeInTheDocument();
+    expect(screen.getByText('3 in use — at limit')).toBeInTheDocument();
+    expect(screen.queryByText(/over limit/i)).not.toBeInTheDocument();
+  });
+
+  it('does not expose the CODESENSE_EDITION setting name', () => {
+    const c = catalog('community');
+    c.active.source = 'env';
+    render(<PlansComparison catalog={c} />);
+    expect(screen.queryByText(/CODESENSE_EDITION/)).not.toBeInTheDocument();
+    expect(screen.getByText('Configured for this installation')).toBeInTheDocument();
+  });
+
   it('shows a warning banner when the active entitlement has warnings', () => {
     const c = catalog('community');
     c.active.warnings = ['entitlements expired on 2026-01-01; defaulting to Community'];

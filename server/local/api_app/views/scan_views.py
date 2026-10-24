@@ -619,54 +619,6 @@ class ScanResumeView(APIView):
         return JsonResponse({"detail": "Scan resumed.", "scan": scan}, status=status.HTTP_202_ACCEPTED)
 
 
-class ModelHealthView(APIView):
-    @require_permission("view_scans")
-    def get(self, request):
-        # This reports on the BUNDLED model (llm.py), the llm_analysis-gated
-        # subsystem that is absent from a Community export
-        # (docs/EDITIONS-REPO-SPLIT.md). Gate before the lazy import so Community
-        # gets a clean 403 instead of an ImportError 500. A user's own LLM
-        # (byo_llm) is reported by /api/llm/status/ instead.
-        from licenses.services import entitlements
-        if not entitlements.get().feature("llm_analysis"):
-            return Response(
-                {"error": "The bundled AI model requires CodeSense Pro or Enterprise. "
-                          "Use GET /api/llm/status/ for your own LLM connection."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        from scanner.byo_llm.redact import redact
-        from scanner.rag.llm import get_llm
-        client = get_llm()
-        try:
-            health = client.healthcheck()
-        except Exception as exc:
-            return Response(
-                {
-                    "status": "error",
-                    "provider": "vllm",
-                    "configured_model": client.model,
-                    "base_url": client.base_url,
-                    "error": redact(exc, client.api_key),
-                },
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        # /models can be unauthenticated — validate inference (API key) for real
-        # so the reported status reflects whether scans can actually use the LLM.
-        inference_ok, inference_detail = client.check_inference()
-        return Response(
-            {
-                "status": "ok" if inference_ok else "degraded",
-                "provider": "vllm",
-                "base_url": health["base_url"],
-                "configured_model": health["configured_model"],
-                "available_models": health["available_models"],
-                "inference_ok": inference_ok,
-                "inference_detail": redact(inference_detail, client.api_key),
-            },
-            status=status.HTTP_200_OK if inference_ok else status.HTTP_503_SERVICE_UNAVAILABLE,
-        )
-
 @method_decorator(csrf_exempt, name="dispatch")
 class SbomCreateView(APIView):
 

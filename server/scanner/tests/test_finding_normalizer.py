@@ -1,10 +1,12 @@
+import os
+import unittest
 import uuid
 
 from django.test import SimpleTestCase
 
 from scanner.rag.finding_normalizer import (
     normalize, build_dataflow_context, dedupe_findings, derive_cvss,
-    _cvss_base_score, _parse_vector)
+    _cvss_base_score, _parse_vector, _strip_extended_prefix)
 from scanner.rag.lsast_types import SemgrepFinding
 
 
@@ -154,6 +156,25 @@ class NormalizeTests(SimpleTestCase):
         finding, _ = normalize(f, "s", "u", scan_root=r"C:\Users\tester\Temp\codesense-media\scans\abc123\source")
         self.assertTrue(finding["file_path"].startswith("src/app.py"))
         self.assertNotIn("codesense-media", finding["file_path"])
+
+    def test_extended_length_prefix_is_stripped(self):
+        self.assertEqual(_strip_extended_prefix("\\\\?\\C:\\scans\\a\\source"), "C:\\scans\\a\\source")
+        self.assertEqual(_strip_extended_prefix("\\\\?\\UNC\\srv\\share\\x"), "\\\\srv\\share\\x")
+        self.assertEqual(_strip_extended_prefix("C:\\scans\\a"), "C:\\scans\\a")
+        self.assertEqual(_strip_extended_prefix("/tmp/scans/a"), "/tmp/scans/a")
+
+    @unittest.skipUnless(os.name == "nt", "Windows path semantics")
+    def test_normalize_strips_scan_root_from_extended_length_path(self):
+        # A scan folder past MAX_PATH is scanned with a \\?\ target, so the engine reports \\?\ paths
+        # while the scan root is the plain folder (and the reverse, depending on the caller).
+        root = "C:\\" + "\\".join(["nested-folder-name"] * 14) + "\\source"
+        for raw, scan_root in (("\\\\?\\" + root + "\\src\\app.py", root),
+                               ("\\\\?\\" + root + "\\src\\app.py", "\\\\?\\" + root),
+                               (root + "\\src\\app.py", "\\\\?\\" + root)):
+            f = _sample_finding()
+            f.file_path = raw
+            finding, _ = normalize(f, "s", "u", scan_root=scan_root)
+            self.assertEqual(finding["file_path"], f"src/app.py [{f.start_line},{f.end_line}]", raw)
 
     def test_normalize_without_scan_root_keeps_existing_behavior(self):
         f = _sample_finding()

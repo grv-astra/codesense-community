@@ -77,6 +77,23 @@ class ScanService extends BaseApiClient {
       responseType: "blob"
     });
   }
+
+  /** Vulnerability or license findings of an SBOM scan as a CSV or JSON file. */
+  async downloadSbomReport(scanId: string, kind: "vulnerabilities" | "licenses", format: "csv" | "json"): Promise<Blob> {
+    const response = await this.axiosInstance.get<Blob>(`api/findings/sbom/export/${scanId}/`, {
+      params: { kind, file_format: format },
+      responseType: "blob",
+    });
+    return response.data;
+  }
+
+  /** The SBOM file itself, or (`signed`) that file zipped with its cosign bundle and public key. */
+  async downloadSbomFile(scanId: string, kind: "sbom" | "signed"): Promise<Blob> {
+    const response = await this.axiosInstance.get<Blob>(`api/findings/sbom/download/${scanId}/${kind}/`, {
+      responseType: "blob",
+    });
+    return response.data;
+  }
 }
 
 export const scanService = new ScanService();

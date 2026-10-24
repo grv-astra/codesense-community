@@ -77,6 +77,13 @@ export function useSbomFindings(scanId: string, params?: { page?: number; limit?
   });
 }
 
+export function useSbomDependencies(scanId: string, params?: { page?: number; limit?: number; search?: string }) {
+  return useQuery({
+    queryKey: ['dependencies', 'sbom', 'list', scanId, params],
+    queryFn: () => findingService.getSbomDependenciesByScan(scanId, params),
+  });
+}
+
 export function useSbomLicenses(scanId: string, params?: { page?: number; limit?: number; search?: string }) {
   return useQuery({
     queryKey: ['licenses', 'sbom', 'list', scanId, params],

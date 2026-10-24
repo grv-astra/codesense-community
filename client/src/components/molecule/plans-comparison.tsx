@@ -97,7 +97,7 @@ export function PlansComparison({ catalog }: Props) {
                 {active.source === 'signed' && active.customer
                   ? `Licensed to ${active.customer}`
                   : active.source === 'env'
-                    ? 'Set via CODESENSE_EDITION'
+                    ? 'Configured for this installation'
                     : active.source === 'signed'
                       ? 'Signed entitlement'
                       : active.source === 'error'
@@ -181,12 +181,14 @@ export function PlansComparison({ catalog }: Props) {
                 <td className="border-b border-border/50 p-3 text-foreground">{label}</td>
                 {editions.map((e) => {
                   const limitVal = e.limits[key];
-                  const over =
+                  const capped =
                     isActive(e) &&
                     used !== undefined &&
                     limitVal !== null &&
-                    limitVal !== undefined &&
-                    used >= (limitVal as number);
+                    limitVal !== undefined;
+                  // At the cap nothing is wrong yet: new items are refused, existing ones stay.
+                  const over = capped && used > (limitVal as number);
+                  const atLimit = capped && used === (limitVal as number);
                   return (
                     <td
                       key={e.edition}
@@ -202,10 +204,14 @@ export function PlansComparison({ catalog }: Props) {
                         <div
                           className={cn(
                             'text-[11px]',
-                            over ? 'font-semibold text-brand-red' : 'text-muted-foreground',
+                            over
+                              ? 'font-semibold text-brand-red'
+                              : atLimit
+                                ? 'font-semibold text-amber-600 dark:text-amber-400'
+                                : 'text-muted-foreground',
                           )}
                         >
-                          {used} in use{over ? ' — over limit' : ''}
+                          {used} in use{over ? ' — over limit' : atLimit ? ' — at limit' : ''}
                         </div>
                       )}
                     </td>

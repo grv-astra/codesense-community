@@ -130,6 +130,31 @@ export interface LicensesListResponse {
   };
 }
 
+/** One package of an SBOM scan with its worst vulnerability severity (GET api/findings/sbom/dependencies/). */
+export interface SbomDependency {
+  id: string;
+  package_name: string;
+  dependence_version: string;
+  package_type: string;
+  /** Worst severity among the package's vulnerabilities, or "none" when it has none. */
+  risk_rating: string;
+  risk_summary: string;
+  vulnerabilities: number;
+  licenses: string[];
+}
+
+export interface SbomDependenciesResponse {
+  dependencies: SbomDependency[];
+  pagination: {
+    total: number;
+    page: number;
+    limit: number;
+    pages: number;
+  };
+  /** False when the scan's SBOM file is gone and only packages with findings could be listed. */
+  inventory_complete: boolean;
+}
+
 // Additional utility types
 export type FindingSeverity = FindingDetails['severity'];
 export type FindingStatus = FindingDetails['status'];

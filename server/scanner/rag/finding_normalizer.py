@@ -235,6 +235,20 @@ def _build_mitigation(f: SemgrepFinding, reference: str) -> str:
     return " ".join(parts)[:1000]
 
 
+def _strip_extended_prefix(path: str) -> str:
+    """Drop a Windows ``\\\\?\\`` extended-length prefix (``\\\\?\\UNC\\`` becomes ``\\\\``).
+
+    The scanner hands the engine a ``\\\\?\\`` target when the scan folder is too deep for MAX_PATH, and
+    the engine then reports every finding path with that prefix. ``os.path.relpath`` treats ``\\\\?\\C:``
+    and ``C:`` as different drives, so the prefix has to go from both sides before comparing.
+    """
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[len("\\\\?\\UNC\\"):]
+    if path.startswith("\\\\?\\"):
+        return path[len("\\\\?\\"):]
+    return path
+
+
 def _relativize_path(raw_path: str, scan_root: str) -> str:
     """Strip ``scan_root`` from an absolute detector-reported path.
 
@@ -247,6 +261,8 @@ def _relativize_path(raw_path: str, scan_root: str) -> str:
     """
     if not scan_root or not raw_path:
         return raw_path
+    raw_path = _strip_extended_prefix(raw_path)
+    scan_root = _strip_extended_prefix(scan_root)
     try:
         if not os.path.isabs(raw_path):
             return raw_path

@@ -1,4 +1,4 @@
-"""Bring-your-own LLM verification (docs/BYO-LLM-DESIGN.md).
+"""Bring-your-own LLM verification.
 
 Lets any edition -- Community included -- verify findings through an LLM the
 user already has. This package ships in the Community export, so it must NEVER

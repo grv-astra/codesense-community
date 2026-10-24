@@ -13,6 +13,22 @@ from local.auth_app.utils.account_integrity import register_user
  
 from licenses.services.auth import require_assertion_jwt
 
+def _password_problem(password):
+    """The first reason ``password`` fails the strength policy, or None when it passes."""
+    try:
+        validate_strong_password(password)
+    except ValidationError as e:
+        # e.detail is usually a list or dict of ErrorDetail objects
+        if isinstance(e.detail, (list, tuple)):
+            return str(e.detail[0])
+        if isinstance(e.detail, dict):
+            # pick first field error
+            first_key = next(iter(e.detail))
+            return str(e.detail[first_key][0])
+        return str(e.detail)
+    return None
+
+
 class ProfileView(APIView):
     @require_authentication()
     def get(self, request):
@@ -66,21 +82,9 @@ class UserModuleView(APIView):
             return Response({"detail": "Email already registered"}, status=status.HTTP_400_BAD_REQUEST)
 
         # strong password validation
-        try:
-            validate_strong_password(data["password"])
-        except ValidationError as e:
-            # e.detail is usually a list or dict of ErrorDetail objects
-            if isinstance(e.detail, (list, tuple)):
-                message = str(e.detail[0])
-            elif isinstance(e.detail, dict):
-                # pick first field error
-                first_key = next(iter(e.detail))
-                message = str(e.detail[first_key][0])
-            else:
-                message = str(e.detail)
-
-            return Response({"detail": message}, status=status.HTTP_400_BAD_REQUEST)
-
+        problem = _password_problem(data["password"])
+        if problem:
+            return Response({"detail": problem}, status=status.HTTP_400_BAD_REQUEST)
 
         user = UserModel.create_user(
             email=data["email"],
@@ -107,6 +111,10 @@ class UserModuleView(APIView):
  
         data = serializer.validated_data
         if "password" in data:
+            # Same policy as account creation: an edit must not be a way round it.
+            problem = _password_problem(data["password"])
+            if problem:
+                return Response({"detail": problem}, status=status.HTTP_400_BAD_REQUEST)
             data["password"] = hash_password(data.get("password"))
         
         user = UserModel.update_user(

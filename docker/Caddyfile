@@ -1,0 +1,17 @@
+# HTTPS front door. SITE_ADDRESS comes from docker/.env:
+#   codesense.example.com        -> Caddy gets and renews a Let's Encrypt certificate (needs DNS + ports 80/443)
+#   http://203.0.113.5           -> plain HTTP, for a throwaway test only
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	request_body {
+		max_size 260MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	reverse_proxy nginx:80
+}

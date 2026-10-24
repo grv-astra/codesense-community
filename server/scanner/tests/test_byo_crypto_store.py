@@ -1,4 +1,4 @@
-"""Step 1 of docs/BYO-LLM-DESIGN.md: API-key encryption + the singleton row."""
+"""API-key encryption + the singleton row."""
 import pathlib
 
 from django.test import SimpleTestCase, TestCase, override_settings

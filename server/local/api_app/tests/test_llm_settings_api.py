@@ -10,7 +10,6 @@ from local.auth_app.models.permission_model import PermissionModel
 from local.auth_app.utils.jwt import generate_token
 from scanner.byo_llm import store
 from scanner.tests.byo_fake_server import FakeLLMServer
-from scanner.tests.edition_test_support import skip_unless_llm_present
 
 KEY = "sk-test-FAKE-0000000000000000"
 NEW_KEY = "sk-test-FAKE-NEWNEWNEWNEW1111"
@@ -343,35 +342,3 @@ class StatusTests(ApiBase):
         ent.reload()
         self.enabled()
         self.assertEqual(self.status()["source"], "byo")
-
-
-class ModelHealthGateTests(TestCase):
-    def setUp(self):
-        for var in ("ENTITLEMENTS_PUBLIC_KEY", "CODESENSE_EDITION"):
-            p = mock.patch.dict(os.environ, {}, clear=False)
-            p.start()
-            self.addCleanup(p.stop)
-            os.environ.pop(var, None)
-        ent.reload()
-        self.addCleanup(ent.reload)
-
-    @override_settings(CODESENSE_EDITION="community", ENTITLEMENTS_PUBLIC_KEY=None)
-    def test_community_gets_a_clean_403_not_a_500(self):
-        from local.api_app.views.scan_views import ModelHealthView
-        ent.reload()
-        resp = ModelHealthView.get.__wrapped__(ModelHealthView(), object())
-        self.assertEqual(resp.status_code, 403)
-        self.assertIn("Pro", resp.data["error"])
-        self.assertIn("/api/llm/status/", resp.data["error"])
-
-    @skip_unless_llm_present()
-    @override_settings(CODESENSE_EDITION="pro", ENTITLEMENTS_PUBLIC_KEY=None)
-    def test_pro_error_text_is_redacted(self):
-        from local.api_app.views.scan_views import ModelHealthView
-        ent.reload()
-        client = mock.Mock(model="m", base_url="http://127.0.0.1:8001/v1", api_key=KEY)
-        client.healthcheck.side_effect = RuntimeError(f"401 for key {KEY}")
-        with mock.patch("scanner.rag.llm.get_llm", return_value=client):
-            resp = ModelHealthView.get.__wrapped__(ModelHealthView(), object())
-        self.assertEqual(resp.status_code, 503)
-        self.assertNotIn(KEY, json.dumps(resp.data))

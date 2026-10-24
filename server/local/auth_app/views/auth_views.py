@@ -13,6 +13,11 @@ from local.auth_app.permissions.decorators import require_role, require_authenti
 class GetPermissionsView(APIView):
     @require_authentication()
     def get(self, request, role):
+        # The role matrix is an admin screen (only admins can change it); everyone else may read
+        # just their own role's permissions (GetMyPermissionsView serves the same thing).
+        caller_role = (request.user.get("role") or "").lower()
+        if caller_role != "admin" and caller_role != role.lower():
+            return Response({"error": "Access denied"}, status=status.HTTP_403_FORBIDDEN)
         permissions = PermissionModel.get_permissions_for_role(role)
         return Response({"role": role, "permissions": permissions}, status=status.HTTP_200_OK)
 
@@ -63,7 +68,7 @@ class LoginView(APIView):
             return Response(integrity_issue, status=status.HTTP_401_UNAUTHORIZED)
 
         if not verify_password(data["password"], user["password"]):
-            return Response({"detail": "Incorrect password, please use vaild credentials"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "Incorrect password, please use valid credentials"}, status=status.HTTP_400_BAD_REQUEST)
 
         searlized_user = UserModel.serialize_user(user=user)
         token = generate_token({

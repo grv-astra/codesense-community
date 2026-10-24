@@ -1,4 +1,4 @@
-"""SSRF policy for the user-supplied LLM base URL (docs/BYO-LLM-DESIGN.md §3.1/§4)."""
+"""SSRF policy for the user-supplied LLM base URL."""
 import socket
 
 from django.test import SimpleTestCase

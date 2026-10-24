@@ -1,4 +1,5 @@
 import { Button } from '@/components/atomic/button';
+import { SbomDownloadMenu } from '@/components/molecule/sbom-download-menu';
 import { useSbomScanDetails } from '@/hooks/use-scans';
 import { createFileRoute, Outlet, useParams, useLocation, Link, useRouter } from '@tanstack/react-router'
 
@@ -27,9 +28,12 @@ function RouteComponent() {
 
   return(
     <div className="p-2">
-      <Button variant="ghost" type="button" onClick={() => router.history.back()} >
-        ←  Back to SBOM Scan List
-      </Button>
+      <div className="flex items-center justify-between">
+        <Button variant="ghost" type="button" onClick={() => router.history.back()} >
+          ←  Back to SBOM Scan List
+        </Button>
+        {scan && <SbomDownloadMenu scan={scan} />}
+      </div>
 
       <div className="max-w-8xl mx-auto pt-2">
       

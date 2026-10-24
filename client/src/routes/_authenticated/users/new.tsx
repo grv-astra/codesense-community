@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from 'sonner';
 import { AxiosError } from 'axios';
 import { Unauthorized } from '@/components/molecule/unauthorized';
+import { PASSWORD_HINT, passwordPolicyError } from '@/lib/password-policy';
 
 export const Route = createFileRoute('/_authenticated/users/new')({
   component: RouteComponent,
@@ -71,8 +72,9 @@ function RouteComponent() {
     }
     if (!form.password.trim()) {
       newErrors.password = 'Password is required';
-    } else if (form.password.length < 8) {
-      newErrors.password = 'Password must be at least 8 characters long';
+    } else {
+      const problem = passwordPolicyError(form.password);
+      if (problem) newErrors.password = problem;
     }
     if (!form.confirmPassword.trim()) {
       newErrors.confirmPassword = 'Confirm password is required';
@@ -212,9 +214,13 @@ function RouteComponent() {
               className={`${
                 errors.password ? 'border-destructive bg-destructive/10' : ''
               }`}
-              placeholder="Enter password (min 6 characters)"
+              placeholder="Enter password"
             />
-            {errors.password && <p className="text-sm text-destructive mt-1">{errors.password}</p>}
+            {errors.password ? (
+              <p className="text-sm text-destructive mt-1">{errors.password}</p>
+            ) : (
+              <p className="text-xs text-muted-foreground mt-1">{PASSWORD_HINT}</p>
+            )}
           </div>
 
           {/* Confirm Password */}

@@ -26,3 +26,21 @@ export function sbomDependencyStats(scan: {
   const pct = (n: number) => (total === 0 ? '0.0' : ((n / total) * 100).toFixed(1));
   return { affected, clean, affectedPercent: pct(affected), cleanPercent: pct(clean) };
 }
+
+/**
+ * One line for the scan details card: the cosign result, or why there is none.
+ * `null` (no line at all) for scans that pre-date signing or come from an older server.
+ */
+export function sbomSigningSummary(
+  signing: { signed: boolean; verified: boolean; verified_at: string | null; skipped_reason: string | null } | null | undefined,
+  formatTime: (iso: string) => string,
+): string | null {
+  if (!signing) return null;
+  if (signing.signed) {
+    const when = signing.verified_at ? ` on ${formatTime(signing.verified_at)}` : '';
+    return signing.verified
+      ? `Signed and verified (cosign)${when}`
+      : 'Signed, but the signature could not be verified';
+  }
+  return signing.skipped_reason === 'edition' ? 'Not signed (not included in this edition)' : 'Not signed';
+}

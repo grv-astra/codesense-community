@@ -1,0 +1,64 @@
+# Code Sense Community: the app-facing proxy behind Caddy. It is not published to the internet; only the
+# caddy container can reach it, so the client address it sees in X-Forwarded-For is trustworthy.
+
+set_real_ip_from 172.16.0.0/12;
+set_real_ip_from 192.168.0.0/16;
+set_real_ip_from 10.0.0.0/8;
+real_ip_header X-Forwarded-For;
+real_ip_recursive on;
+
+# Brute-force limits: sign-in and the first-run admin creation.
+limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=setup:1m rate=3r/m;
+limit_req_status 429;
+
+server {
+    listen 80;
+    server_name _;
+    server_tokens off;
+
+    # Look the services up again as they restart (a recreated container can get a new address).
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set $backend_upstream backend:8585;
+    set $frontend_upstream frontend:3000;
+
+    # Zip uploads (Community allows up to 250 MB of source) and slow links.
+    client_max_body_size 260m;
+    client_body_timeout 300s;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer always;
+
+    # First-run admin creation is open to whoever reaches it, so only the address in SETUP_ALLOW_IP may.
+    # (Once an admin exists the backend refuses it anyway.)
+    location = /api/auth/setup/admin/ {
+        allow ${SETUP_ALLOW_IP};
+        deny all;
+        limit_req zone=setup burst=3 nodelay;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://$backend_upstream;
+    }
+
+    location = /api/auth/login/ {
+        limit_req zone=login burst=5 nodelay;
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://$backend_upstream;
+    }
+
+    location /api/ {
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_read_timeout 300s;
+        proxy_pass http://$backend_upstream;
+    }
+
+    # The Django admin is not used by Code Sense.
+    location /admin/ {
+        return 404;
+    }
+
+    location / {
+        include /etc/nginx/snippets/proxy.conf;
+        proxy_pass http://$frontend_upstream;
+    }
+}

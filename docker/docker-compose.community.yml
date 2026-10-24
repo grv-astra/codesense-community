@@ -1,0 +1,111 @@
+# Code Sense Community on one host (for example a DigitalOcean droplet).
+#
+#   Internet -> caddy (HTTPS, certificates) -> nginx (limits, blocks) -> backend + frontend
+#
+# Only caddy publishes ports. Setup, backup and update steps: docker/DEPLOY-DIGITALOCEAN.md
+# Configuration: copy docker/community.env.example to docker/.env and fill it in.
+name: codesense
+
+services:
+  # The backend looks for its account-registry folder and signing-key folder at start-up and
+  # silently falls back to a folder inside the container when they are missing, so create them
+  # in the data volume first.
+  init:
+    image: busybox:1.37
+    command: ["sh", "-c", "mkdir -p /data/license_data /data/keys && chmod 700 /data/keys /data/license_data"]
+    volumes:
+      - codesense_data:/data
+    restart: "no"
+
+  backend:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    environment:
+      CODESENSE_EDITION: community
+      # Scan cap for this instance. With TRIAL_MODE=true each scan type (code, SBOM) allows TRIAL_SCAN_LIMIT
+      # successful scans in total, counted forever (deleting scans does not free a slot). Off by default.
+      TRIAL_MODE: ${TRIAL_MODE:-false}
+      TRIAL_SCAN_LIMIT: ${TRIAL_SCAN_LIMIT:-2}
+      CODESENSE_DATA_DIR: /data
+      LOCAL_KEYS_DIR: /data/license_data
+      COSIGN_KEY_DIR: /data/keys
+      COSIGN_PASSWORD: ${COSIGN_PASSWORD:?set COSIGN_PASSWORD in docker/.env}
+      LICENSE_SECRET: ${LICENSE_SECRET:?set LICENSE_SECRET in docker/.env}
+      LICENSE_DURATION_DAYS: ${LICENSE_DURATION_DAYS:-90}
+      # Empty = the backend generates a key once and keeps it in the data volume.
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-}
+      # localhost / 127.0.0.1 are for the container health check.
+      DJANGO_ALLOWED_HOSTS: ${SITE_HOST:?set SITE_HOST in docker/.env},localhost,127.0.0.1
+      DJANGO_CSRF_TRUSTED_ORIGINS: https://${SITE_HOST},http://${SITE_HOST}
+    volumes:
+      - codesense_data:/data
+    expose:
+      - "8585"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8585/api/edition/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    logging: &log_rotation
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: client/Dockerfile
+      args:
+        # Empty = same origin: nginx serves the app and the API from one address, so there is no CORS.
+        VITE_BACKEND_URL: ""
+    expose:
+      - "3000"
+    logging: *log_rotation
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    environment:
+      SETUP_ALLOW_IP: ${SETUP_ALLOW_IP:?set SETUP_ALLOW_IP in docker/.env}
+    volumes:
+      # The nginx image fills ${SETUP_ALLOW_IP} into *.template files at start-up.
+      - ./nginx.community.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx-proxy.snippet:/etc/nginx/snippets/proxy.conf:ro
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    logging: *log_rotation
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in docker/.env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - nginx
+    logging: *log_rotation
+    restart: unless-stopped
+
+volumes:
+  codesense_data:
+  caddy_data:
+  caddy_config:

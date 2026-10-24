@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shlex
+import signal
 import subprocess
 from typing import Any
 
@@ -403,6 +404,65 @@ def _absolutize_paths(findings: list[SemgrepFinding], base_dir: str) -> None:
             f.file_path = os.path.normpath(os.path.join(base_dir, f.file_path))
 
 
+# After the engine's process tree has been killed on a timeout, how long to wait for its output pipes
+# to close before giving up on them.
+_REAP_SECONDS = 15
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """End the engine and every process it started.
+
+    The engine is a launcher that starts a chain of worker processes. ``Popen.kill()`` ends only the
+    launcher; the workers carry on, still holding the output pipe. On Windows that matters twice: they
+    keep burning CPU, and ``subprocess.run`` waits for the pipe to close after its timeout, so a scan
+    that overran by minutes could not even report that it had timed out until the engine finished on
+    its own (measured: a 10 s limit took 142 s to raise). The tree has to be killed while the launcher
+    still exists, as ``taskkill /T`` follows parent links.
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30, check=False)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)         # the engine runs in its own process group
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Could not kill the engine's process tree (pid %s): %s", proc.pid, exc)
+    try:
+        proc.kill()
+    except OSError:
+        pass                                            # already gone
+
+
+def _run_engine(cmd: list[str], *, env: dict, cwd: str | None, timeout: float) -> subprocess.CompletedProcess:
+    """Run the engine and return its output; on ``timeout`` kill its whole process tree and raise
+    ``subprocess.TimeoutExpired`` straight away."""
+    extra = {} if os.name == "nt" else {"start_new_session": True}
+    # Decode the engine's output as UTF-8 explicitly. Without `encoding`, text mode uses the host
+    # locale codec (cp1252 on many Windows machines), and the first byte that codec cannot map
+    # (e.g. 0x8d in "Í") kills the reader thread: stdout comes back empty and the scan silently
+    # reports 0 findings. The PYTHONUTF8 set on `env` only affects the engine, not how this
+    # process decodes the pipe. errors="replace" keeps one stray malformed byte from discarding an
+    # entire scan's results.
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+        errors="replace", env=env, cwd=cwd, **extra,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            proc.communicate(timeout=_REAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.warning("The engine's output pipes did not close %ds after its process tree was killed",
+                           _REAP_SECONDS)
+        raise subprocess.TimeoutExpired(cmd, timeout) from None
+    except BaseException:
+        _kill_process_tree(proc)                        # e.g. the scan thread was interrupted
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
     bin_path = get_semgrep_bin()
     if bin_path and (os.sep in bin_path or "/" in bin_path):
@@ -510,16 +570,7 @@ def run_semgrep(target: str | list[str]) -> list[SemgrepFinding]:
 
     logger.info("Running Semgrep%s: %s", f" (from inside {cwd})" if cwd else "", shlex.join(cmd))
     try:
-        # Decode the engine's output as UTF-8 explicitly. Without `encoding`, text=True uses the
-        # host locale codec (cp1252 on many Windows machines), and the first byte that codec
-        # cannot map (e.g. 0x8d in "Í") kills subprocess's reader thread: stdout comes back
-        # empty and the scan silently reports 0 findings. The PYTHONUTF8 set on `env` above only
-        # affects the engine, not how this process decodes the pipe. errors="replace" keeps one
-        # stray malformed byte from discarding an entire scan's results.
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=_TIMEOUT_SECONDS, check=False, env=env, cwd=cwd,
-        )
+        result = _run_engine(cmd, env=env, cwd=cwd, timeout=_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         logger.error("Semgrep timed out after %ds: %s", _TIMEOUT_SECONDS, exc)
         raise SemgrepDetectionError(

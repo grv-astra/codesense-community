@@ -74,6 +74,17 @@ export interface SbomScanDetails {
   created_at: string;
   end_time: string | null;
   triggered_by: string;
+  /** Cosign result. `null` for scans that pre-date signing; absent on older servers. */
+  signing?: SbomSigning | null;
+}
+
+export interface SbomSigning {
+  signed: boolean;
+  verified: boolean;
+  verified_at: string | null;
+  algorithm: string | null;
+  /** "edition" when the running edition does not sign SBOMs. */
+  skipped_reason: string | null;
 }
 
 export interface CreateScanDetails {

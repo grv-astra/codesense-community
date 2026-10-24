@@ -104,7 +104,7 @@ const defaultMenuItems: MenuItem[] = [
     title: 'Settings',
     icon: <Cog className="w-4 h-4" />,
     href: '/settings',
-    alwaysVisible: true
+    requiredRoles: ['superuser', 'admin'],
   },
   {
     id: 'profile',

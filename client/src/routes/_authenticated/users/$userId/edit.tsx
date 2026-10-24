@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { toastApiError } from '@/lib/api-error';
+import { PASSWORD_HINT, passwordPolicyError } from '@/lib/password-policy';
 import { createFileRoute, useNavigate, useParams } from '@tanstack/react-router';
 import { Card, CardHeader, CardTitle } from '@/components/atomic/card';
 import { useUpdateProfile, useUserProfile } from '@/hooks/use-user';
@@ -86,9 +87,8 @@ function RouteComponent() {
     
     // Only validate password if it's provided (optional for updates)
     if (form.password && form.password.length > 0) {
-      if (form.password.length < 6) {
-        newErrors.password = 'Password must be at least 6 characters long';
-      }
+      const problem = passwordPolicyError(form.password);
+      if (problem) newErrors.password = problem;
       if (form.password !== form.confirmPassword) {
         newErrors.confirmPassword = 'Passwords do not match';
       }
@@ -238,9 +238,13 @@ function RouteComponent() {
               className={`${
                 errors.password ? 'border-destructive bg-destructive/10' : ''
               }`}
-              placeholder="Enter new password (min 6 characters)"
+              placeholder="Enter new password"
             />
-            {errors.password && <p className="text-sm text-destructive mt-1">{errors.password}</p>}
+            {errors.password ? (
+              <p className="text-sm text-destructive mt-1">{errors.password}</p>
+            ) : (
+              <p className="text-xs text-muted-foreground mt-1">{PASSWORD_HINT}</p>
+            )}
           </div>
 
           {/* Confirm Password */}

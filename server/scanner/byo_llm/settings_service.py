@@ -1,4 +1,4 @@
-"""Business rules behind the AI-verification settings API (docs/BYO-LLM-DESIGN.md §3.3).
+"""Business rules behind the AI-verification settings API.
 
 Kept out of the views so the rules are unit-testable:
 

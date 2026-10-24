@@ -10,7 +10,7 @@ are rejected.
 The check is done on the RESOLVED addresses, not the URL string, so decimal / hex /
 octal IP spellings, IPv4-mapped IPv6 and DNS names that point at metadata IPs are
 all caught. It must be re-run before every request (DNS can change); a residual
-resolve-then-connect race remains and is accepted (docs/BYO-LLM-DESIGN.md §4).
+resolve-then-connect race remains and is accepted.
 """
 from __future__ import annotations
 

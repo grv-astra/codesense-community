@@ -1,6 +1,29 @@
 import { describe, expect, it } from 'vitest';
 
-import { sbomDependencyStats } from './sbom-stats';
+import { sbomDependencyStats, sbomSigningSummary } from './sbom-stats';
+
+describe('sbomSigningSummary', () => {
+  const when = (iso: string) => `T(${iso})`;
+  const signed = { signed: true, verified: true, verified_at: '2026-10-22T10:00:00+00:00', skipped_reason: null };
+
+  it('says a verified signature was verified, and when', () => {
+    expect(sbomSigningSummary(signed, when)).toBe('Signed and verified (cosign) on T(2026-10-22T10:00:00+00:00)');
+  });
+
+  it('does not claim verification that did not happen', () => {
+    expect(sbomSigningSummary({ ...signed, verified: false }, when)).toMatch(/could not be verified/);
+  });
+
+  it('explains an edition without signing', () => {
+    const skipped = { signed: false, verified: false, verified_at: null, skipped_reason: 'edition' };
+    expect(sbomSigningSummary(skipped, when)).toBe('Not signed (not included in this edition)');
+  });
+
+  it('shows nothing for scans that have no signing record', () => {
+    expect(sbomSigningSummary(null, when)).toBeNull();
+    expect(sbomSigningSummary(undefined, when)).toBeNull();
+  });
+});
 
 describe('sbomDependencyStats', () => {
   // Regression: 3 packages with 11 CVEs rendered "-8 clean packages" and "366.7% affected".

@@ -48,7 +48,7 @@ class ParseSemgrepJsonTests(SimpleTestCase):
 class RunSemgrepTests(SimpleTestCase):
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_invokes_semgrep_with_rules_and_returns_findings(self, mock_run, _bin, _rules):
         mock_run.return_value = mock.Mock(returncode=0, stdout=FIXTURE.read_text(), stderr="")
         findings = run_semgrep("/some/code/path")
@@ -83,7 +83,7 @@ class RunSemgrepTests(SimpleTestCase):
     @unittest.skipUnless(os.name == "nt", "the extended-length prefix is a Windows concern")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_a_target_under_a_build_folder_is_not_given_the_prefix(self, mock_run, _bin, _rules):
         mock_run.return_value = mock.Mock(returncode=0, stdout='{"results":[]}', stderr="")
         target = r"C:\build\data\media\scans\abc\source"
@@ -95,7 +95,7 @@ class RunSemgrepTests(SimpleTestCase):
 
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_falls_back_to_registry_packs_when_no_bundled_rules(self, mock_run, _bin, _rules):
         mock_run.return_value = mock.Mock(returncode=0, stdout='{"results":[]}', stderr="")
         run_semgrep("/code")
@@ -105,7 +105,7 @@ class RunSemgrepTests(SimpleTestCase):
 
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_forces_utf8_env_and_omits_metrics_flag(self, mock_run, _bin, _rules):
         # The bundled engine is OpenGrep: it rejects --metrics (rc=2) and reads
         # rule YAMLs with the process locale, so we drop the flag and force UTF-8.
@@ -125,7 +125,7 @@ class RunSemgrepTests(SimpleTestCase):
     )
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_strips_pythonhome_and_pythonpath_from_child_env(self, mock_run, _bin, _rules):
         # Regression coverage for a real production incident: this app is
         # itself a frozen Python build, and a stray PYTHONHOME/PYTHONPATH
@@ -142,14 +142,14 @@ class RunSemgrepTests(SimpleTestCase):
 
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_returns_empty_on_semgrep_failure(self, mock_run, _bin, _rules):
         mock_run.return_value = mock.Mock(returncode=2, stdout="", stderr="rule load error")
         self.assertEqual(run_semgrep("/code"), [])
 
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_rc1_returns_findings(self, mock_run, _bin, _rules):
         """rc=1 is Semgrep's normal 'matches found' exit code; findings must be returned."""
         mock_run.return_value = mock.Mock(returncode=1, stdout=FIXTURE.read_text(), stderr="")
@@ -158,7 +158,7 @@ class RunSemgrepTests(SimpleTestCase):
 
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_raises_on_timeout_instead_of_silently_returning_empty(self, mock_run, _bin, _rules):
         # Regression: a timed-out Semgrep invocation used to be swallowed and
         # return [] -- indistinguishable from a genuinely clean scan. A large
@@ -170,7 +170,7 @@ class RunSemgrepTests(SimpleTestCase):
 
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_raises_when_semgrep_binary_missing(self, mock_run, _bin, _rules):
         mock_run.side_effect = FileNotFoundError("no such file")
         with self.assertRaises(SemgrepDetectionError):
@@ -179,7 +179,7 @@ class RunSemgrepTests(SimpleTestCase):
     @mock.patch("scanner.rag.semgrep_detector.get_privacy_rules_dir", return_value="/privacy-rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_layers_privacy_rules_config_alongside_bundled_rules(self, mock_run, _bin, _rules, _privacy):
         mock_run.return_value = mock.Mock(returncode=0, stdout='{"results":[]}', stderr="")
         run_semgrep("/code")
@@ -192,7 +192,7 @@ class RunSemgrepTests(SimpleTestCase):
     @mock.patch("scanner.rag.semgrep_detector.get_privacy_rules_dir", return_value="/privacy-rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_layers_privacy_rules_config_alongside_registry_packs(self, mock_run, _bin, _rules, _privacy):
         mock_run.return_value = mock.Mock(returncode=0, stdout='{"results":[]}', stderr="")
         run_semgrep("/code")
@@ -203,7 +203,7 @@ class RunSemgrepTests(SimpleTestCase):
     @mock.patch("scanner.rag.semgrep_detector.get_privacy_rules_dir", return_value="")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value="/rules")
     @mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep")
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_omits_privacy_config_when_not_bundled(self, mock_run, _bin, _rules, _privacy):
         mock_run.return_value = mock.Mock(returncode=0, stdout='{"results":[]}', stderr="")
         run_semgrep("/code")
@@ -317,7 +317,7 @@ class CodeSnippetRecoveryTests(SimpleTestCase):
         self.assertEqual(_read_code_lines("/no/such/file", 1, 1), "")
         self.assertEqual(_read_code_lines("", 0, 0), "")
 
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_run_semgrep_recovers_redacted_snippet(self, mock_run):
         import os, tempfile
         p = os.path.join(tempfile.mkdtemp(), "installation.py")
@@ -363,7 +363,7 @@ class ReadCodeLinesWithContextTests(SimpleTestCase):
 
 
 class RunSemgrepContextWideningTests(SimpleTestCase):
-    @mock.patch("scanner.rag.semgrep_detector.subprocess.run")
+    @mock.patch("scanner.rag.semgrep_detector._run_engine")
     def test_run_semgrep_sets_context_code_and_start_line(self, mock_run):
         import os, tempfile
         p = os.path.join(tempfile.mkdtemp(), "app.py")
@@ -446,7 +446,7 @@ class FolderTargetTests(SimpleTestCase):
         with mock.patch("scanner.rag.semgrep_detector.get_semgrep_rules_dir", return_value=rules), \
              mock.patch("scanner.rag.semgrep_detector.get_privacy_rules_dir", return_value=""), \
              mock.patch("scanner.rag.semgrep_detector.get_semgrep_bin", return_value="/bin/semgrep"), \
-             mock.patch("scanner.rag.semgrep_detector.subprocess.run") as mock_run:
+             mock.patch("scanner.rag.semgrep_detector._run_engine") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=stdout, stderr="")
             findings = run_semgrep(target)
         return findings, mock_run
