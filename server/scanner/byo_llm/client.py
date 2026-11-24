@@ -2,7 +2,8 @@
 
 * bounded retries with exponential backoff + jitter for network errors, 5xx and 429
   (429 honours ``Retry-After``, capped);
-* a semaphore caps simultaneous requests (the scanner runs findings in a thread pool);
+* a first-come, first-served semaphore caps simultaneous requests (the scanner runs findings in a
+  thread pool; a plain semaphore let busy workers starve the others, see fair_semaphore.py);
 * a circuit breaker stops calling a provider that is clearly broken: a fatal error
   (bad key, wrong URL/model) trips it at once, N consecutive failed calls trips it
   too. After that every call fails fast, so a dead LLM costs a scan seconds, not
@@ -24,6 +25,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from .fair_semaphore import FairSemaphore
 from .providers.base import (
     Provider, ProviderError, ProviderRateLimited, ProviderResult, ProviderUnavailable,
 )
@@ -66,7 +68,7 @@ class ByoClient:
                  sleep=time.sleep, jitter=random.random):
         self.provider = provider
         self.stats = CallStats()
-        self._sem = threading.BoundedSemaphore(max(1, max_concurrency))
+        self._sem = FairSemaphore(max(1, max_concurrency))
         self._max_attempts = max(1, max_attempts)
         self._breaker_threshold = max(1, breaker_threshold)
         self._max_delay_s = max_delay_s

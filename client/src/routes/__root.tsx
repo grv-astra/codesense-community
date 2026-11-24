@@ -18,8 +18,9 @@ function RootComponent() {
     body = <FirstRunSetup state={assetSetup} />;
   } else if (activation.state.status === 'locked') {
     body = <ActivationGate error={activation.error} submitting={activation.submitting} onSubmit={activation.submit} />;
-  } else if (activation.state.status === 'checking') {
-    body = <CheckingActivation />; // loading state, not a login-page flash
+  } else if (activation.state.status === 'checking' || activation.state.status === 'unreachable') {
+    // loading state, not a login-page flash; 'unreachable' = still waiting, with a longer note
+    body = <CheckingActivation slow={activation.state.status === 'unreachable'} />;
   } else {
     body = <Outlet />;
   }

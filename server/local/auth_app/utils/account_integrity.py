@@ -86,6 +86,31 @@ def unregister_user(user):
         _save_registry(registry)
 
 
+def registry_path():
+    """Where the registry file is read from and written to (for operator messages)."""
+    return _registry_path()
+
+
+def refresh_registered_user(user):
+    """Re-snapshot ``user`` ONLY if the registry already tracks it.
+
+    For sanctioned out-of-band changes (the ``reset-password`` CLI): without this the
+    next sign-in fails with "protected account details were modified locally". It never
+    adds an entry, so accounts that were never registered (e.g. the first admin made by
+    the setup wizard) stay unregistered. Returns True when an entry was updated.
+    """
+    if not user:
+        return False
+    email = _safe_string(user.get("email")).strip().lower()
+    registry = _load_registry()
+    existing = registry.get(email)
+    if not existing:
+        return False
+    registry[email] = _user_snapshot(user, created_by=existing.get("created_by"))
+    _save_registry(registry)
+    return True
+
+
 def sync_protected_accounts(created_by="provisioning"):
     registry = {}
     for user in UserModel.find_protected(list(PROTECTED_ROLES)):

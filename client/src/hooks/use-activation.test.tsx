@@ -68,7 +68,7 @@ describe('useActivation', () => {
     expect(getStatus).toHaveBeenCalledTimes(3);
   });
 
-  test('locks only after retries are genuinely exhausted', async () => {
+  test('an unreachable backend never shows the activation screen: it becomes "unreachable"', async () => {
     getStatus.mockRejectedValue(new Error('connection refused'));
     const { result } = renderHook(() => useActivation(true));
 
@@ -77,7 +77,64 @@ describe('useActivation', () => {
 
     // 20 retries * 1000ms -- run them all out.
     await flush(21 * 1000);
+    expect(result.current.state.status).toBe('unreachable');
+    expect(result.current.state.status).not.toBe('locked');
+  });
+
+  test('keeps polling after the quick retries and unlocks when the backend finally answers', async () => {
+    getStatus.mockRejectedValue(new Error('connection refused'));
+    const { result } = renderHook(() => useActivation(true));
+    await flush(21 * 1000);
+    expect(result.current.state.status).toBe('unreachable');
+
+    const callsSoFar = getStatus.mock.calls.length;
+    await flush(3000); // slow cadence: one more attempt per 3 s
+    expect(getStatus.mock.calls.length).toBe(callsSoFar + 1);
+
+    getStatus.mockResolvedValue({ configured: true, activated: true });
+    await flush(3000);
+    expect(result.current.state.status).toBe('unlocked');
+  });
+
+  test('a late definitive "not activated" answer still locks', async () => {
+    getStatus.mockRejectedValue(new Error('connection refused'));
+    const { result } = renderHook(() => useActivation(true));
+    await flush(21 * 1000);
+    expect(result.current.state.status).toBe('unreachable');
+
+    getStatus.mockResolvedValue({ configured: true, activated: false });
+    await flush(3000);
     expect(result.current.state.status).toBe('locked');
+  });
+
+  test('stops polling when unmounted', async () => {
+    getStatus.mockRejectedValue(new Error('connection refused'));
+    const { unmount } = renderHook(() => useActivation(true));
+    await flush(21 * 1000);
+    unmount();
+    const calls = getStatus.mock.calls.length;
+    await flush(30 * 1000);
+    expect(getStatus.mock.calls.length).toBe(calls);
+  });
+
+  test('submit: no response from the backend is reported as unreachable, not as a wrong password', async () => {
+    getStatus.mockResolvedValue({ configured: true, activated: false });
+    activate.mockRejectedValue(new Error('Network Error')); // axios error without .response
+    const { result } = renderHook(() => useActivation(true));
+    await flush();
+    act(() => { result.current.submit('whatever'); });
+    await flush();
+    expect(result.current.error).toMatch(/could not reach/i);
+  });
+
+  test('submit: a rejected password keeps the incorrect-password message', async () => {
+    getStatus.mockResolvedValue({ configured: true, activated: false });
+    activate.mockRejectedValue({ response: { status: 403, data: {} } });
+    const { result } = renderHook(() => useActivation(true));
+    await flush();
+    act(() => { result.current.submit('nope'); });
+    await flush();
+    expect(result.current.error).toBe('Incorrect activation password.');
   });
 
   test('unlocked immediately when the first check succeeds and is activated', async () => {

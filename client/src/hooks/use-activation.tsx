@@ -4,12 +4,18 @@ import { activationService } from '@/services/activation.service';
 
 export type ActivationState =
   | { status: 'checking' }
+  // The backend has not answered for ~20 s. Says nothing about activation, so the
+  // activation screen must NOT be shown; keep polling until it answers.
+  | { status: 'unreachable' }
   | { status: 'not_required' }
   | { status: 'locked' }
   | { status: 'unlocked' };
 
 const MAX_RETRIES = 20;
 const RETRY_DELAY_MS = 1000;
+// After the quick retries, keep going at a gentler pace for as long as the screen is open
+// (a slow first start, security software scanning the app, ...).
+const SLOW_RETRY_DELAY_MS = 3000;
 
 /**
  * @param ready Only start checking once true. main.rs spawns the backend
@@ -31,7 +37,9 @@ export function useActivation(ready: boolean) {
     }
 
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const attempt = (retriesLeft: number) => {
+      if (cancelled) return;
       activationService.getStatus()
         .then(({ configured, activated }) => {
           if (cancelled) return;
@@ -39,21 +47,26 @@ export function useActivation(ready: boolean) {
         })
         .catch(() => {
           if (cancelled) return;
-          // A failed request here is almost always the backend not having
-          // finished starting yet, not a genuine "not activated" -- retry
-          // instead of showing the activation gate on a false negative
-          // (this was flashing on every normal launch). Only fall back to
-          // "locked" after real, repeated attempts.
+          // A failed request here means the backend is not answering (still
+          // starting, slow, or blocked) -- NOT "not activated". The activation
+          // screen is only for a definitive answer from the backend, otherwise a
+          // slow or blocked backend looks like a licence problem and the password
+          // form could not reach it anyway. Retry quickly at first, then keep
+          // polling slowly while showing a "taking longer" note.
           if (retriesLeft > 0) {
-            setTimeout(() => attempt(retriesLeft - 1), RETRY_DELAY_MS);
+            timer = setTimeout(() => attempt(retriesLeft - 1), RETRY_DELAY_MS);
           } else {
-            setState({ status: 'locked' });
+            setState((s) => (s.status === 'unreachable' ? s : { status: 'unreachable' }));
+            timer = setTimeout(() => attempt(0), SLOW_RETRY_DELAY_MS);
           }
         });
     };
     attempt(MAX_RETRIES);
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -73,7 +86,12 @@ export function useActivation(ready: boolean) {
         }
       })
       .catch((err) => {
-        const detail = err?.response?.data?.detail;
+        // No response at all = the backend could not be reached; that is not a wrong password.
+        if (!err?.response) {
+          setError('Could not reach Code Sense. Please wait a moment and try again.');
+          return;
+        }
+        const detail = err.response.data?.detail;
         setError(typeof detail === 'string' ? detail : 'Incorrect activation password.');
       })
       .finally(() => setSubmitting(false));
